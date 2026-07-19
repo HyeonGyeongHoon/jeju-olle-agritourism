@@ -158,3 +158,6 @@ Thumbs.db
 
 # Antigravity agent temp/scratch files
 .agents/
+
+# Project documentation
+docs/
