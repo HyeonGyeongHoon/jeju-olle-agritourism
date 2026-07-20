@@ -160,10 +160,11 @@ Thumbs.db
 .agents/
 
 # Raw Data (PDFs, map images, and uncommitted raw assets)
-data/*.pdf
-data/raw/
 data/raw_data/
-data/map_images/
+
+# Project internal documentation
+docs/
+
 
 
 

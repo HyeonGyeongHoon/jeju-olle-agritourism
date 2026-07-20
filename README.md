@@ -12,7 +12,7 @@
 
 ## 3. 주요 아키텍처 및 데이터 흐름
 ```
-[ PDF 가이드북 ] 
+[ PDF 가이드북 (data/raw_data/) ] 
        │
        ▼ (PyMuPDF & Parser)
 [ 4개 핵심 아티팩트 (MD, JSON, CSV) ]
@@ -27,14 +27,10 @@
 ## 4. 디렉토리 구조
 ```
 jeju-olle-docent/
-├── .agents/                    # 프롬프트 및 에이전트 규칙 설정
-├── data/                       # 가이드북 원본 PDF 및 추출 아티팩트
-│   ├── extracted/              # 정제 완료된 MD, JSON, CSV 파일
-│   └── map_images/             # 추출된 코스 지도 이미지
-├── docs/                       # 기획서, 가이드, 진행 보고서
-│   ├── hybrid_rag_mvp_plan.md  # MVP 하이브리드 RAG 상세 기획서
-│   ├── progress_report.md      # 데이터 전처리 & DB 적재 진행 보고서
-│   └── setup_guide.md          # 로컬 개발 및 실행 환경 구축 가이드
+├── .agents/                    # 프롬프트 및 에이전트 규칙 설정 (Git 제외)
+├── data/                       # 가이드북 정제 데이터 및 로컬 데이터
+│   ├── extracted/              # 정제 완료된 MD, JSON, CSV 파일 (Git 추적)
+│   └── raw_data/               # 원본 PDF 및 추출 지도 이미지 (Git 제외)
 ├── src/                        # 소스 코드
 │   ├── ingestion/              # PDF 파싱, 비전 추출, DB 적재 모듈
 │   └── models/                 # Pydantic 스키마 정의
@@ -43,30 +39,59 @@ jeju-olle-docent/
 └── tests/                      # 파서 및 DB 로더 단위 테스트
 ```
 
-## 5. 시작 가이드
-자세한 개발 환경 구축 및 가이드 사항은 [설정 가이드](./docs/setup.md) 를 참고하시기 바랍니다.
+## 5. 로컬 개발 및 시작 가이드
 
-### 1) 환경 변수 설정
-프로젝트 루트 경로에 `.env` 파일 을 생성하고 아래 환경 변수를 입력합니다.
-```env
-SUPABASE_URL=your_supabase_url
-SUPABASE_KEY=your_supabase_anon_or_service_key
-SOLAR_API_KEY=your_upstage_solar_api_key
-OPENAI_API_KEY=your_openai_api_key
+### 1) Windows 파이썬 실행 오류 해결 (앱 실행 별칭 비활성화)
+윈도우 환경에서 `python` 이나 `python3` 명령 실행 시 Microsoft Store 가 열리거나 `Python` 이라는 메시지만 출력된 채 비정상 종료(Exit Code 1) 되는 문제를 해결합니다.
+1. Windows 작업 표시줄 검색창에 **앱 실행 별칭 관리** (또는 '앱 실행 별칭') 를 입력하여 설정 창으로 진입합니다.
+2. 목록 내에서 `python.exe` 와 `python3.exe` (앱 설치 관리자) 항목 을 찾아 **끔** (Off) 으로 변경합니다.
+3. 설정 완료 후 PowerShell 창을 완전히 닫고 다시 실행합니다.
+
+### 2) Python 런타임 설치
+- **설치 버전**: **Python 3.10.x** 이상 권장 (Target Version 3.10)
+- **설치 링크**: [Python 공식 다운로드 페이지](https://www.python.org/downloads/)
+- **설치 시 주의 사항**: 설치 마법사(Installer) 첫 화면 하단에 있는 **Add python.exe to PATH** 옵션 을 반드시 체크해야 합니다.
+
+### 3) 프로젝트 가상환경 구축 및 의존성 설치
+Windows PowerShell 환경에서 가상환경(venv) 을 만들고 의존성 라이브러리를 설치합니다.
+```powershell
+# 가상환경 생성
+python -m venv .venv
+
+# PowerShell 실행 정책 변경 (최초 1회 필수)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+
+# 가상환경 활성화
+.venv\Scripts\Activate.ps1
+
+# 의존성 라이브러리 설치
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
-템플릿 파일은 [.env.example](./.env.example) 을 참조하세요.
 
-### 2) 데이터 파싱 및 아티팩트 변환
+### 4) Supabase Cloud 및 API 연동 (.env)
+루트 디렉토리에 `.env` 파일 을 신규 생성하고 필요한 키를 작성합니다.
+```env
+SUPABASE_URL=your_supabase_project_url_here
+SUPABASE_KEY=your_supabase_anon_or_service_key_here
+SOLAR_API_KEY=your_upstage_solar_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+```
+참고용 예시 템플릿은 [.env.example](./.env.example) 파일 을 참고하세요.
+
+### 5) 데이터 파싱 및 아티팩트 변환
 ```powershell
 python -m src.ingestion.convert_artifacts
 ```
 
-### 3) 단위 테스트 실행
+### 6) 단위 테스트 및 코드 품질 검사 (Ruff)
 ```powershell
+# 휠체어 구간 및 파서 단위 테스트 실행
 python -m pytest
-```
 
-### 4) 코드 스타일 검사 (Linting)
-```powershell
+# 코드 오류 및 컨벤션 검사 (Ruff)
 ruff check .
+
+# 코드 포맷 자동 교정
+ruff format .
 ```
