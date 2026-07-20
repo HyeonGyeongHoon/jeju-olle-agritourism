@@ -159,3 +159,9 @@ Thumbs.db
 # Antigravity agent temp/scratch files
 .agents/
 
+# Raw Data (PDFs and map images)
+data/*.pdf
+data/raw/
+data/map_images/
+
+
