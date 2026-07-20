@@ -1,7 +1,13 @@
+-- Supabase 데이터베이스 초기화 및 리셋 구문 (기존 테이블 삭제)
+DROP TABLE IF EXISTS course_chunks CASCADE;
+DROP TABLE IF EXISTS wheelchair_accessible_segments CASCADE;
+DROP TABLE IF EXISTS course_sub_segments CASCADE;
+DROP TABLE IF EXISTS courses CASCADE;
+
 -- pgvector 활성화
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- 1. 코스 메타데이터 테이블
+-- 1. 코스 메타데이터 테이블 (부모 테이블)
 CREATE TABLE IF NOT EXISTS courses (
     id SERIAL PRIMARY KEY,
     course_name VARCHAR(100) NOT NULL UNIQUE,
@@ -12,7 +18,20 @@ CREATE TABLE IF NOT EXISTS courses (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. 휠체어 보행 가능 구간 테이블 (정적 시딩 데이터용 구조)
+-- 2. 세부 구간 분할 메타데이터 테이블 (부분 탐방 큐레이션용 신규 테이블)
+CREATE TABLE IF NOT EXISTS course_sub_segments (
+    id SERIAL PRIMARY KEY,
+    course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+    sub_segment_name VARCHAR(255) NOT NULL,
+    start_point VARCHAR(255) NOT NULL,
+    end_point VARCHAR(255) NOT NULL,
+    distance_km NUMERIC(4, 1) NOT NULL,
+    estimated_time_hours NUMERIC(3, 1) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. 휠체어 보행 가능 구간 테이블 (정적 시딩 데이터용 구조)
 CREATE TABLE IF NOT EXISTS wheelchair_accessible_segments (
     id SERIAL PRIMARY KEY,
     course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
@@ -23,18 +42,17 @@ CREATE TABLE IF NOT EXISTS wheelchair_accessible_segments (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. 코스 본문 청크 및 벡터 테이블
+-- 4. 코스 본문 청크 및 벡터 테이블 (Upstage Solar Embedding 4096차원)
 CREATE TABLE IF NOT EXISTS course_chunks (
     id SERIAL PRIMARY KEY,
     course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     content TEXT NOT NULL,
-    embedding VECTOR(1536),
+    embedding VECTOR(4096),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 휠체어 구간 고정 Seed 데이터 삽입 (하이브리드 참조 매핑)
--- 이 데이터는 고정 데이터이므로 인제스천 파이프라인에서 동적으로 파싱하지 않고 DDL 셋업 시 정적으로 적재합니다.
 INSERT INTO wheelchair_accessible_segments (course_id, segment_name, start_address, distance_km, difficulty_level)
 VALUES 
 ((SELECT id FROM courses WHERE course_name = '1코스' LIMIT 1), '1코스 휠체어 구간 (종달리 옛 소금밭 ~ 성산갑문 입구 구간)', '제주시 구좌읍 종달리 814-5', 4.6, '중'),
