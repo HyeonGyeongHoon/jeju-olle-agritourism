@@ -70,7 +70,3 @@ python -m pytest
 ```powershell
 ruff check .
 ```
-
-## 6. 개발 및 하네스 제약 규칙
-- **DB 적재 사전 승인**: 데이터베이스 적재 및 Embedding API 호출 작업은 사용자의 사전 승인 후 실행합니다.
-- **Git Push 사전 승인**: 원격 저장소 `git push` 명령어는 반드시 사용자의 승인을 구한 후 진행합니다.
