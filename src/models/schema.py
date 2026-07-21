@@ -7,12 +7,19 @@ class CourseSchema(BaseModel):
     """제주올레 코스 메타데이터 검증을 위한 Pydantic 모델입니다."""
 
     course_name: str = Field(..., description="코스명 (예: 1코스)")
+    opening_date: str = Field(default="", description="개장일")
     total_distance_km: float = Field(..., ge=0.0, description="코스 총 거리 (km)")
     estimated_time_hours: float = Field(
         ..., ge=0.0, description="예상 소요 시간 (시간)"
     )
+    estimated_time_text: str = Field(default="", description="예상 소요 시간 표기 (예: 4~5시간)")
+    difficulty: str = Field(default="중", description="난이도 (상, 중, 하)")
+    course_description: str = Field(default="", description="코스 요약 설명")
+    has_wheelchair_segment: str = Field(default="없음", description="휠체어 구간 존재 여부 (있음, 없음)")
     start_point: str = Field(..., description="코스 시작점 명칭")
     end_point: str = Field(..., description="코스 종점 명칭")
+    stamp_locations: str = Field(default="", description="스탬프 찍는 곳 명칭")
+    lunch_info: str = Field(default="", description="식당 및 점심 정보")
 
 
 class CourseSubSegmentSchema(BaseModel):

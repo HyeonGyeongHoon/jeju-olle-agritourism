@@ -65,19 +65,45 @@ def get_solar_embedding(text: str) -> list[float]:
 def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
     """코스 메타데이터, 세부 구간 메타데이터 및 청크 임베딩 데이터를 Supabase DB에 적재합니다."""
     for course in courses:
-        # 1. 코스 메타데이터 적재 또는 업서트
-        course_data = {
+        # 1. 코스 메타데이터 적재 또는 업서트 (풀 스키마 시도)
+        full_course_data = {
+            "course_name": course["course_name"],
+            "opening_date": course.get("opening_date", ""),
+            "total_distance_km": course.get("total_distance_km", 0.0),
+            "estimated_time_hours": course.get("estimated_time_hours", 0.0),
+            "estimated_time_text": course.get("estimated_time_text", ""),
+            "difficulty": course.get("difficulty", "중"),
+            "course_description": course.get("course_description", ""),
+            "has_wheelchair_segment": course.get("has_wheelchair_segment", "없음"),
+            "start_point": course.get("start_point", "미정"),
+            "end_point": course.get("end_point", "미정"),
+            "stamp_locations": course.get("stamp_locations", ""),
+            "lunch_info": course.get("lunch_info", ""),
+        }
+        
+        basic_course_data = {
             "course_name": course["course_name"],
             "total_distance_km": course.get("total_distance_km", 0.0),
             "estimated_time_hours": course.get("estimated_time_hours", 0.0),
             "start_point": course.get("start_point", "미정"),
             "end_point": course.get("end_point", "미정"),
         }
-        res = (
-            client.table("courses")
-            .upsert(course_data, on_conflict="course_name")
-            .execute()
-        )
+
+        try:
+            res = (
+                client.table("courses")
+                .upsert(full_course_data, on_conflict="course_name")
+                .execute()
+            )
+        except Exception as e:
+            # DB 스키마 컬럼 미확장 시 기본 컬럼으로 Fallback 적재
+            print(f"[!] '{course['course_name']}' 풀 스키마 적재 실패, 기본 컬럼으로 Fallback 적재: {e}")
+            res = (
+                client.table("courses")
+                .upsert(basic_course_data, on_conflict="course_name")
+                .execute()
+            )
+
         course_id = res.data[0]["id"] if res.data else None
 
         if not course_id:
@@ -94,7 +120,10 @@ def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
                 "estimated_time_hours": sub_seg.get("estimated_time_hours", 0.0),
                 "description": sub_seg.get("description", ""),
             }
-            client.table("course_sub_segments").insert(sub_seg_data).execute()
+            try:
+                client.table("course_sub_segments").insert(sub_seg_data).execute()
+            except Exception as e:
+                print(f"[!] '{course['course_name']}' 세부 구간 '{sub_seg_data['sub_segment_name']}' 적재 실패: {e}")
 
         # 3. 청크 텍스트 및 Solar 임베딩 벡터 적재
         for chunk in course.get("chunks", []):
@@ -113,5 +142,47 @@ def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
 def load_wheelchair_segments_to_db(client: Client, segments: list[dict]) -> bool:
     """휠체어 구간 정보를 Supabase RDB에 적재합니다."""
     if segments:
-        client.table("wheelchair_accessible_segments").upsert(segments).execute()
+        try:
+            client.table("wheelchair_accessible_segments").upsert(segments).execute()
+        except Exception as e:
+            print(f"[!] 휠체어 보행 구간 DB 적재 건너뜀 (테이블 확인 필요): {e}")
     return True
+
+
+def load_safety_etiquette_to_db(client: Client, guide_data: dict) -> bool:
+    """안전 수칙, 에티켓, 준비물 및 탐방 팁 가이드 데이터를 Supabase RDB에 적재합니다."""
+    if not guide_data:
+        return False
+
+    records = []
+
+    # 1. safety_rules
+    for item in guide_data.get("safety_rules", []):
+        records.append({"category": "safety_rules", "content": item, "metadata": {}})
+
+    # 2. etiquette
+    for item in guide_data.get("etiquette", []):
+        records.append({"category": "etiquette", "content": item, "metadata": {}})
+
+    # 3. recommended_equipment
+    for item in guide_data.get("recommended_equipment", []):
+        content_text = f"{item.get('item', '')}: {item.get('description', '')}"
+        records.append(
+            {
+                "category": "recommended_equipment",
+                "content": content_text,
+                "metadata": item,
+            }
+        )
+
+    # 4. travel_planning_tips
+    for item in guide_data.get("travel_planning_tips", []):
+        records.append({"category": "travel_planning_tips", "content": item, "metadata": {}})
+
+    if records:
+        try:
+            client.table("safety_etiquette_guide").upsert(records).execute()
+        except Exception as e:
+            print(f"[!] 안전 및 에티켓 가이드 DB 적재 건너뜀 (테이블 확인 필요): {e}")
+    return True
+
