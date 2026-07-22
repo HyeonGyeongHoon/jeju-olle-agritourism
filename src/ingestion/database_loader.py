@@ -63,9 +63,11 @@ def get_solar_embedding(text: str) -> list[float]:
 
 
 def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
-    """코스 메타데이터, 세부 구간 메타데이터 및 청크 임베딩 데이터를 Supabase DB에 적재합니다."""
+    """코스 메타데이터, 세부 구간 메타데이터, 로컬 추천 상점 및 청크 임베딩 데이터를 Supabase DB에 적재합니다."""
+    from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
+
     for course in courses:
-        # 1. 코스 메타데이터 적재 또는 업서트 (풀 스키마 시도)
+        # 1. 코스 메타데이터 적재 또는 업서트
         full_course_data = {
             "course_name": course["course_name"],
             "opening_date": course.get("opening_date", ""),
@@ -79,6 +81,8 @@ def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
             "end_point": course.get("end_point", "미정"),
             "stamp_locations": course.get("stamp_locations", ""),
             "lunch_info": course.get("lunch_info", ""),
+            "crops": course.get("crops", ""),
+            "administrative_areas": course.get("administrative_areas", ""),
         }
         
         basic_course_data = {
@@ -109,7 +113,42 @@ def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
         if not course_id:
             continue
 
-        # 2. 세부 구간 분할 메타데이터 적재 (신규 기능)
+        # 1-1. 비짓제주 Open API 기반 로컬 추천 상점 수집 및 적재
+        crops_list = [c.strip() for c in course.get("crops", "").split(",") if c.strip()]
+        areas_list = [a.strip() for a in course.get("administrative_areas", "").split(",") if a.strip()]
+        
+        for crop in crops_list:
+            for area in areas_list:
+                recommendations = get_visit_jeju_recommendations(crop, area)
+                for rec in recommendations:
+                    rec_data = {
+                        "course_id": course_id,
+                        "crop_tag": rec["crop_tag"],
+                        "title": rec["title"],
+                        "address": rec["address"],
+                        "road_address": rec["road_address"],
+                        "phone": rec["phone"],
+                        "introduction": rec["introduction"],
+                        "latitude": rec["latitude"],
+                        "longitude": rec["longitude"],
+                        "administrative_area": rec["administrative_area"],
+                        "metadata": rec.get("metadata", {})
+                    }
+                    try:
+                        # 중복 상점 삽입 방지 검증
+                        existing = (
+                            client.table("local_recommendations")
+                            .select("id")
+                            .eq("course_id", course_id)
+                            .eq("title", rec["title"])
+                            .execute()
+                        )
+                        if not existing.data:
+                            client.table("local_recommendations").insert(rec_data).execute()
+                    except Exception as e:
+                        print(f"[!] '{course['course_name']}' 로컬 상점 '{rec['title']}' 적재 중 오류: {e}")
+
+        # 2. 세부 구간 분할 메타데이터 적재
         for sub_seg in course.get("sub_segments", []):
             sub_seg_data = {
                 "course_id": course_id,
