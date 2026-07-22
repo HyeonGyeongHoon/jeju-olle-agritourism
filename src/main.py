@@ -68,10 +68,15 @@ async def event_generator(query: str):
         events = await loop.run_in_executor(None, run_graph)
 
         final_response_text = None
+        weather_info = None
 
         for event in events:
             node_name = list(event.keys())[0]
             node_output = event[node_name]
+
+            # safety_evaluator 노드가 산출한 실시간 날씨 상태를 추적 (retriever 보다 먼저 실행됨)
+            if node_output.get("weather_info"):
+                weather_info = node_output["weather_info"]
 
             # 1. retriever 노드가 완료된 즉시 메타데이터 정보 전송
             if node_name == "retriever" and not metadata_sent:
@@ -79,7 +84,7 @@ async def event_generator(query: str):
                     "retrieved_courses": [c["course_name"] for c in node_output.get("retrieved_chunks", [])],
                     "fallback_applied": node_output.get("fallback_applied", False),
                     "fallback_reason": node_output.get("fallback_reason", ""),
-                    "weather_warning": inputs.get("weather_info", {}).get("warnings", []) if inputs.get("weather_info") else []
+                    "weather_warning": weather_info.get("warnings", []) if weather_info else []
                 }
                 yield f"event: metadata\ndata: {json.dumps(metadata, ensure_ascii=False)}\n\n"
                 metadata_sent = True
