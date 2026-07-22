@@ -1,0 +1,63 @@
+"""
+scripts/run_culture_db_ingestion.py
+=====================================
+data/culture_knowledge/crop_culture_docs.json 에 작성된 제주 밭담 문화 및 작물별 생육/문화 지식
+문서를 Solar Embedding(4096차원)으로 임베딩하여 Supabase `culture_crop_knowledge` 테이블에 적재합니다.
+
+주의 (Gate B): 이 스크립트는 임베딩 API 호출 및 DB 적재를 수행하는 비가역적 작업입니다.
+사용자의 사전 승인 없이 자동 실행하지 마세요. 실행 전 supabase/schema.sql 의
+`culture_crop_knowledge` 테이블 및 `match_culture_chunks` 함수가 이미 생성되어 있어야 합니다.
+"""
+
+import json
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
+
+DOCS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "culture_knowledge", "crop_culture_docs.json"
+)
+
+
+def run():
+    with open(DOCS_PATH, "r", encoding="utf-8") as f:
+        docs = json.load(f)
+
+    print(f"[*] 적재 대상 문서 {len(docs)}건 로드 완료")
+
+    client = get_supabase_client()
+
+    for doc in docs:
+        crop_name = doc.get("crop_name")
+        title = doc["title"]
+        content = doc["content"]
+
+        # 이미 동일 제목의 문서가 적재되어 있으면 건너뜀 (재실행 시 중복 방지)
+        existing = (
+            client.table("culture_crop_knowledge")
+            .select("id")
+            .eq("title", title)
+            .execute()
+        )
+        if existing.data:
+            print(f"[-] 이미 적재됨, 건너뜀: {title}")
+            continue
+
+        print(f"[*] 임베딩 및 적재 중: {title}")
+        embedding_vector = get_solar_embedding(content)
+        client.table("culture_crop_knowledge").insert({
+            "crop_name": crop_name,
+            "title": title,
+            "content": content,
+            "embedding": embedding_vector,
+        }).execute()
+
+    print("\n[OK] 제주 밭담문화·작물 지식 DB 적재가 완료되었습니다!")
+
+
+if __name__ == "__main__":
+    run()

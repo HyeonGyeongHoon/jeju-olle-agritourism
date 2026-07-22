@@ -1,17 +1,28 @@
 import json
+import os
+from datetime import date
 from typing import Dict, Any, List
 from src.agent.llm_client import get_chat_completion
-from src.agent.weather_client import simulate_weather_by_query, get_current_weather
+from src.agent.weather_client import simulate_weather_by_query, get_seasonal_climate_note
 from src.agent.router import route_intent
 from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
+from src.models.schema import B2BQueryParams
 from src.agent.state import AgentState
 
 
 def route_intent_node(state: AgentState) -> Dict[str, Any]:
     """사용자 질의를 4가지 카테고리로 사전 분류하여, 이후 로컬 맛집/카페 추천 노드 실행 여부를
     결정짓는 Intent Router 노드입니다.
+    호출부(B2B 구조화 입력 등)가 intent_category 를 이미 확정해 넘긴 경우, LLM 분류 호출 없이
+    그대로 통과시킵니다.
     """
+    if state.get("intent_category"):
+        return {
+            "intent_category": state["intent_category"],
+            "target_course": state.get("target_course")
+        }
+
     result = route_intent(state["query"])
     return {
         "intent_category": result.category.value,
@@ -20,17 +31,25 @@ def route_intent_node(state: AgentState) -> Dict[str, Any]:
 
 
 def parse_intent_node(state: AgentState) -> Dict[str, Any]:
-    """사용자의 자연어 질문에서 의도 및 Hard/Soft 제약 조건을 추출하여 정형화하는 Intent Parser 노드입니다."""
+    """사용자의 자연어 질문에서 의도, Hard/Soft 제약 조건, 그리고 B2B 기획서 생성에 필요한
+    핵심 파라미터(방문 시기, 매개 작물/테마, 선호 지역, 컨셉)를 추출하여 정형화하는
+    Intent Parser 노드입니다.
+    """
     query = state["query"]
-    
-    system_prompt = """당신은 제주올레 탐방객의 요구사항을 분석하여 쿼리 조건으로 변환하는 전문 분석기입니다.
-사용자의 자연어 입력에서 절대 타협할 수 없는 'Hard Constraints'와 완화 가능한 'Soft Constraints'를 추출하여 아래 JSON 규격으로만 응답하세요.
+
+    system_prompt = """당신은 제주올레 탐방객/기획자의 자연어 요청을 분석하여 검색 조건으로 변환하는 전문 분석기입니다.
+사용자의 자연어 입력에서 아래 항목들을 추출하여 JSON 규격으로만 응답하세요.
 JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 반환하세요.
 
 [추출 규칙]
 1. hard_constraints: 휠체어 전용 구간 등 신체/동행 조건과 관련된 필수 제약 (wheelchair_required: true/false)
 2. soft_constraints: 소요시간(max_time_hours), 거리(max_distance_km), 난이도(difficulty: 상/중/하)
 3. vector_query: 가이드북 임베딩 검색에 사용할 핵심 자연어 키워드 및 작물명 (예: "당근 밭길", "감귤 코스", "마늘향" 등)
+4. target_month: 질문에 명시된 방문 예정 월 (1~12 정수, 언급 없으면 null). "가을"처럼 계절만 언급된 경우 해당 계절의 대표 월(가을=10)로 추정
+5. season: 질문에 언급된 계절 표현 원문 (예: "가을", "봄", 없으면 null)
+6. key_item_or_crop: 질문의 핵심 매개 작물/테마 아이템 (예: "당근", "마늘", "밭담", "숲길", "해안", 없으면 null)
+7. preferred_location: 질문에 언급된 선호 지역/코스 (예: "구좌읍", "1코스", "동부", 없으면 null)
+8. concept_theme: 질문의 컨셉/테마 (예: "힐링", "평지 트레킹", "농가 체험", 없으면 null)
 
 [응답 포맷 (JSON 전용)]
 {
@@ -42,12 +61,17 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
     "max_distance_km": number or null,
     "difficulty": string or null
   },
-  "vector_query": string
+  "vector_query": string,
+  "target_month": number or null,
+  "season": string or null,
+  "key_item_or_crop": string or null,
+  "preferred_location": string or null,
+  "concept_theme": string or null
 }"""
 
     try:
         raw_res = get_chat_completion(system_prompt, query)
-        
+
         # 코드 펜스 제거
         cleaned = raw_res.strip()
         if cleaned.startswith("```"):
@@ -55,8 +79,15 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
             if cleaned.endswith("```"):
                 cleaned = cleaned.rsplit("```", 1)[0]
         cleaned = cleaned.strip()
-        
+
         parsed = json.loads(cleaned)
+        b2b_params = B2BQueryParams(
+            target_month=parsed.get("target_month"),
+            season=parsed.get("season"),
+            key_item_or_crop=parsed.get("key_item_or_crop"),
+            preferred_location=parsed.get("preferred_location"),
+            concept_theme=parsed.get("concept_theme"),
+        ).model_dump()
     except Exception as e:
         print(f"[!] 의도 파싱 중 오류 발생: {e}. 기본 제약 조건으로 폴백합니다.")
         parsed = {
@@ -64,96 +95,159 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
             "soft_constraints": {"max_time_hours": None, "max_distance_km": None, "difficulty": None},
             "vector_query": query
         }
-        
-    return {"parsed_constraints": parsed}
+        b2b_params = B2BQueryParams().model_dump()
+
+    return {"parsed_constraints": parsed, "b2b_params": b2b_params}
 
 
 def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
-    """현재 날씨 상황을 진단하여 기상 악화 시 안전 우회 동선을 수립하는 Safety Evaluator 노드입니다."""
+    """방문 시기(월)의 정적 계절 기후 특성과 질의 텍스트 기반 위험 키워드 시뮬레이션을 결합해
+    기후 및 동선 리스크를 진단하는 Safety Evaluator 노드입니다. 실시간 외부 기상 API 를 호출하지
+    않고, 문서화된 계절 지식(get_seasonal_climate_note)만 사용합니다.
+    """
     query = state["query"]
-    
-    # 1. 쿼리에서 유력한 제주도 행정구역(읍·면·동) 키워드 추출
-    area = "제주"
-    for token in ["성산", "구좌", "남원", "한림", "애월", "조천", "한경", "대정", "안덕", "표선", "우도", "추자"]:
-        if token in query:
-            area = token + "읍" if token in ["성산", "구좌", "남원", "한림", "애월", "조천", "대정", "안덕", "표선", "한경"] else token + "도"
-            break
-            
-    # 2. 기상청 API 를 통한 실시간 날씨 데이터 수집
-    real_weather = get_current_weather(area)
-    
-    # 3. 질문 텍스트 기반 시뮬레이션 날씨 진단 (태풍 등 위험 시나리오 데모/검증용)
+    b2b_params = state.get("b2b_params") or {}
+    target_month = b2b_params.get("target_month") or date.today().month
+
+    # 1. 방문 월 기반 정적 계절 기후 특성 조회 (외부 API 호출 없음)
+    seasonal_weather = get_seasonal_climate_note(target_month)
+
+    # 2. 질문 텍스트 기반 시뮬레이션 날씨 진단 (태풍 등 위험 시나리오 데모/검증용, 100% 로컬)
     simulated_weather = simulate_weather_by_query(query)
 
-    # 4. 실시간 기상 상태와 시뮬레이션 기상 상태 결합
+    # 3. 계절 기후와 시뮬레이션 결합
     # 시뮬레이션의 DANGER(태풍/폭우/홍수)만 실제 판단에 반영합니다.
     # WARNING 등급("바람", "비" 등 일상 대화에서도 흔히 쓰이는 단어 기반)까지 반영하면
     # 실제 위험이 없어도 오탐으로 안전 우회가 발동할 수 있어 실제 판단에서는 제외합니다.
-    weather = real_weather
+    weather = seasonal_weather
     if simulated_weather["status"] == "DANGER":
         weather = simulated_weather
-        
+
     safety_check = {
         "safety_status": weather["status"],
         "reason": weather["description"],
         "reroute_required": weather["status"] in ["WARNING", "DANGER"],
         "alternative_query_override": None
     }
-    
+
     # 기상 악화 시 대체 안전 경로(내륙 숲길, 우회로)를 추천하도록 쿼리 보정 정보 추가
     if safety_check["reroute_required"]:
         if weather["status"] == "DANGER":
             safety_check["alternative_query_override"] = "바람을 피해 걷기 좋은 내륙 숲길 오솔길 코스"
         else:
-            safety_check["alternative_query_override"] = "해안 도로 대신 바람이 차단된 조용하고 안전한 중산간 올레길 코스"
-            
+            safety_check["alternative_query_override"] = weather.get("guideline") or "해안 도로 대신 바람이 차단된 조용하고 안전한 중산간 올레길 코스"
+
     return {
         "weather_info": weather,
         "safety_check": safety_check
     }
 
 
+_LOCAL_CULTURE_DOCS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "culture_knowledge", "crop_culture_docs.json"
+)
+
+
+def _search_local_culture_docs(key_item_or_crop: str | None, query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    """culture_crop_knowledge 벡터 DB 가 아직 적재되지 않았거나 조회에 실패했을 때, 로컬 문서
+    (data/culture_knowledge/crop_culture_docs.json)에서 키워드 매칭으로 대체 검색하는 폴백입니다.
+    DB 적재가 완료되면 retrieve_rag_node 의 pgvector 검색이 우선 시도되고, 이 함수는 자동으로
+    호출되지 않습니다.
+    """
+    try:
+        with open(_LOCAL_CULTURE_DOCS_PATH, "r", encoding="utf-8") as f:
+            docs = json.load(f)
+    except Exception as e:
+        print(f"[!] 로컬 문화 지식 문서 로드 실패: {e}")
+        return []
+
+    matched = []
+    general = []
+    for i, doc in enumerate(docs):
+        crop_name = doc.get("crop_name")
+        entry = {
+            "id": i,
+            "crop_name": crop_name,
+            "title": doc["title"],
+            "content": doc["content"],
+            "similarity": 1.0
+        }
+        if crop_name is None:
+            general.append(entry)
+        elif (key_item_or_crop and (key_item_or_crop in crop_name or crop_name in key_item_or_crop)) or (
+            crop_name in (query_text or "")
+        ):
+            matched.append(entry)
+
+    results = matched[:top_k]
+    if len(results) < top_k:
+        results += general[: top_k - len(results)]
+    return results
+
+
+def _crop_location_boost(chunk: Dict[str, Any], key_item_or_crop: str | None, preferred_location: str | None) -> int:
+    """작물/지역 소프트 매칭 점수. 정확히 하나의 코스를 미리 알 수 없는 자연어 질의에서
+    벡터 유사도 순위를 유지하면서도 언급된 작물/지역이 포함된 코스를 우선 배치하기 위한 보정치입니다.
+    """
+    boost = 0
+    if key_item_or_crop and key_item_or_crop in (chunk.get("crops") or ""):
+        boost += 1
+    if preferred_location and (
+        preferred_location in (chunk.get("administrative_areas") or "")
+        or preferred_location in (chunk.get("course_name") or "")
+    ):
+        boost += 1
+    return boost
+
+
 def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     """RDB 메타 필터링과 pgvector 유사도 검색을 조합하여 관련 코스 정보를 조회하며,
     결과가 없을 시 계층적으로 소프라 제약을 완화(Fallback)하는 Retriever 노드입니다.
+    올레 코스 정보와 별도로, 제주 밭담문화·작물 생육 지식 DB(culture_crop_knowledge)도
+    함께 검색하여 문서 근거가 있는 도슨트 서사를 뒷받침합니다.
     """
     constraints = state["parsed_constraints"] or {}
     safety = state["safety_check"] or {}
-    
+    target_course = state.get("target_course")
+    b2b_params = state.get("b2b_params") or {}
+    key_item_or_crop = b2b_params.get("key_item_or_crop")
+    preferred_location = b2b_params.get("preferred_location")
+
     hard = constraints.get("hard_constraints", {})
     soft = constraints.get("soft_constraints", {})
     vector_query = constraints.get("vector_query", state["query"])
-    
+
     # 기상 경보로 인한 안전 우회 쿼리 보정 적용
     if safety.get("reroute_required") and safety.get("alternative_query_override"):
         vector_query = safety["alternative_query_override"]
-        
+
     client = get_supabase_client()
-    
+
     # RDB 기반 계층적 필터링 및 Fallback 로직
     fallback_applied = False
     fallback_reason = None
-    
+
     # 1차 조회 시도 (엄격한 조건)
-    course_ids = _execute_rdb_filtering(client, hard, soft)
-    
+    course_ids = _execute_rdb_filtering(client, hard, soft, target_course)
+
     # 2차 조회 시도 (Soft Constraints 완화 - Fallback 1단계)
     if not course_ids and (soft.get("max_time_hours") or soft.get("max_distance_km") or soft.get("difficulty")):
         fallback_applied = True
         fallback_reason = "요청하신 조건(시간/거리/난이도)을 완벽히 충족하는 코스가 존재하지 않아 조건을 완화하여 대안 코스를 탐색합니다."
-        
+
         relaxed_soft = {
             "max_time_hours": (soft["max_time_hours"] + 2.0) if soft.get("max_time_hours") else None,
             "max_distance_km": (soft["max_distance_km"] + 5.0) if soft.get("max_distance_km") else None,
             "difficulty": None  # 난이도 조건은 해제
         }
-        course_ids = _execute_rdb_filtering(client, hard, relaxed_soft)
-        
+        course_ids = _execute_rdb_filtering(client, hard, relaxed_soft, target_course)
+
     # 3차 조회 시도 (Hard Constraints 만 고정하고 Soft Constraints 는 전면 해제 - Fallback 2단계)
     if not course_ids:
         fallback_applied = True
         fallback_reason = "제시한 세부 조건을 충족하는 코스가 없어, 절대 조건(휠체어 통행 등)만을 충족하는 최적의 추천 코스를 브리핑합니다."
-        course_ids = _execute_rdb_filtering(client, hard, {"max_time_hours": None, "max_distance_km": None, "difficulty": None})
+        course_ids = _execute_rdb_filtering(client, hard, {"max_time_hours": None, "max_distance_km": None, "difficulty": None}, target_course)
 
     # pgvector 유사도 기반 청크 추출
     chunks_data = []
@@ -190,22 +284,74 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
                 })
         except Exception as e:
             print(f"[!] RAG 벡터 검색 중 예외 발생: {e}")
-            
+
+    # 언급된 작물/지역이 포함된 코스를 유사도 순위를 유지한 채 우선 배치 (안정 정렬)
+    if key_item_or_crop or preferred_location:
+        chunks_data.sort(key=lambda c: -_crop_location_boost(c, key_item_or_crop, preferred_location))
+
+    # 제주 밭담문화·작물 생육 지식 DB 검색 (외부 API 대신 검증된 문서 기반 근거 확보)
+    # culture_crop_knowledge 테이블이 아직 적재되지 않은 경우, 로컬 JSON 문서 검색으로 자동 폴백합니다.
+    culture_chunks_data = []
+    culture_query = key_item_or_crop or vector_query
+    try:
+        culture_vector = get_solar_embedding(culture_query)
+        culture_rpc_res = client.rpc("match_culture_chunks", {
+            "query_embedding": culture_vector,
+            "match_threshold": 0.1,
+            "match_count": 3
+        }).execute()
+        for item in culture_rpc_res.data:
+            culture_chunks_data.append({
+                "id": item["id"],
+                "crop_name": item.get("crop_name"),
+                "title": item["title"],
+                "content": item["content"],
+                "similarity": item["similarity"]
+            })
+    except Exception as e:
+        print(f"[!] 밭담문화·작물 지식 DB 검색 실패, 로컬 문서로 폴백합니다: {e}")
+
+    if not culture_chunks_data:
+        culture_chunks_data = _search_local_culture_docs(key_item_or_crop, culture_query)
+
+    # 최상위 매칭 코스의 실제 세부 구간(구간명 + 누적 km)을 조회 (B2B 타임라인 표의 근거 데이터)
+    sub_segments_data = []
+    if chunks_data:
+        top_course_id = chunks_data[0]["course_id"]
+        try:
+            seg_res = (
+                client.table("course_sub_segments")
+                .select("sub_segment_name,distance_km")
+                .eq("course_id", top_course_id)
+                .order("distance_km")
+                .execute()
+            )
+            sub_segments_data = seg_res.data or []
+        except Exception as e:
+            print(f"[!] 세부 구간 데이터 조회 실패 (course_id={top_course_id}): {e}")
+
     return {
         "retrieved_chunks": chunks_data,
+        "culture_chunks": culture_chunks_data,
+        "sub_segments": sub_segments_data,
         "fallback_applied": fallback_applied,
         "fallback_reason": fallback_reason
     }
 
 
-def _execute_rdb_filtering(client: Any, hard: dict, soft: dict) -> List[int]:
+def _execute_rdb_filtering(client: Any, hard: dict, soft: dict, target_course: str | None = None) -> List[int]:
     """courses 테이블을 메타데이터 기반으로 SQL 필터링하여 일치하는 코스 ID 리스트를 반환합니다."""
     query = client.table("courses").select("id")
-    
+
+    # 0. 특정 코스가 명시적으로 지정된 경우(B2B 구조화 입력 등) 정확히 일치하는 코스만 반환.
+    #    사용자가 이미 선택한 코스 정체성은 완화 대상이 아니므로 모든 Fallback 단계에서 유지됩니다.
+    if target_course:
+        query = query.eq("course_name", target_course)
+
     # 1. Hard Constraints 필터링 (절대 보장)
     if hard.get("wheelchair_required"):
         query = query.eq("has_wheelchair_segment", "있음")
-        
+
     # 2. Soft Constraints 필터링
     if soft.get("max_time_hours"):
         query = query.lte("estimated_time_hours", soft["max_time_hours"])
@@ -223,62 +369,124 @@ def _execute_rdb_filtering(client: Any, hard: dict, soft: dict) -> List[int]:
 
 
 def generate_docent_node(state: AgentState) -> Dict[str, Any]:
-    """검색된 코스 컨텍스트 및 작물 생육 지식을 엮어 매력적인 도슨트 어조의 답변 초안을 작성하는 Docent Generator 노드입니다."""
+    """검색된 코스 컨텍스트, 실제 세부 구간(km) 데이터, 제주 밭담문화·작물 생육 지식 DB 근거를 엮어
+    B2B 관광 상품 기획서의 [📊 B2B 상품 개요 & 스펙]/[📍 타임라인 표] 섹션을 작성하는
+    Docent Generator(=Report Synthesizer) 노드입니다. 이어지는 [☕ 로컬 상생 제휴 아이디어]/
+    [🌤️ 기후 리스크 및 Plan B]/[🛡️ Trust Tagging] 섹션은 local_recommender 노드가 담당합니다.
+    """
     query = state["query"]
     chunks = state["retrieved_chunks"]
+    culture_chunks = state.get("culture_chunks") or []
+    sub_segments = state.get("sub_segments") or []
     fallback = state["fallback_applied"]
     reason = state["fallback_reason"]
     weather = state["weather_info"] or {}
-    
+
     if not chunks:
-        fallback_msg = "죄송합니다. 요청하신 조건에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었어요. 조건을 다르게 설정해 질문해 주시겠어요?"
+        fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
         return {"docent_answer": fallback_msg, "final_response": fallback_msg}
-        
-    # 컨텍스트 빌드
+
+    # 코스 컨텍스트 빌드
     context_str = ""
     for i, c in enumerate(chunks):
         context_str += f"\n[코스 {i+1}]: {c['course_name']} (거리: {c['total_distance_km']}km, 소요시간: {c['estimated_time_text']}, 난이도: {c['difficulty']})\n"
         context_str += f"재배작물: {c['crops']}, 경유 행정구역: {c['administrative_areas']}\n"
         context_str += f"내용: {c['content']}\n"
-        
-    system_prompt = f"""당신은 따뜻하고 전문적인 '제주올레 전문 도슨트'입니다.
-제공된 [검색 결과 컨텍스트] 와 현재 [날씨 상황] 을 기반으로 탐방객에게 최적의 올레길 코스를 추천하는 답변을 작성하세요.
 
-[현재 날씨 상황]
-- 온도: {weather.get('temperature', 22.0)}°C, 강풍속도: {weather.get('wind_speed_ms', 3.0)}m/s, 특보사항: {', '.join(weather.get('warnings', [])) or '없음'}
+    # 밭담문화·작물 생육 지식 DB 컨텍스트 빌드 (외부 API 대신 문서 근거 확보)
+    culture_context_str = ""
+    for i, cc in enumerate(culture_chunks):
+        culture_context_str += f"\n[문화지식 {i+1}] {cc['title']}:\n{cc['content']}\n"
+    if not culture_context_str:
+        culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다. 일반 지식으로 보완하세요.)"
 
-[작성 지침]
-1. 사용자의 신체 조건(예: 휠체어 여부)이나 기상 악화(예: 강풍/태풍)가 탐지되었다면, 안전이 완벽히 검증되고 우회 조정된 동선임을 강조해 안심시켜 주세요.
-2. 계층적 완화(Fallback 적용 여부: {fallback})가 True라면, 원래 요청했던 세부 기준(시간, 거리 등)을 완화하여 대안으로 더 알맞은 코스를 추천한 이유(완화 사유: {reason})를 정중히 브리핑해 주세요.
-3. 추천하는 각 코스의 핵심 매개체 작물(예: 당근, 감귤, 마늘 등)을 강조하고, 작물이 올레길에서 펼쳐내는 시각적 풍경(예: '말미오름에서 내려다보이는 초록빛 당근잎밭', '삼달리 귤밭길의 하얀 감귤꽃향기')과 계절적 생육 특징을 인문 도슨트 해설로 풍성하게 녹여내세요.
-4. 문체는 정중하면서도 따뜻한 제주올레 가이드 어조(~해요, ~합니다)를 유지하세요."""
+    # 실제 세부 구간(구간명 + 누적 km) 컨텍스트 빌드 - 타임라인 표의 유일한 사실 근거
+    if sub_segments:
+        segments_str = "\n".join(f"- {s['sub_segment_name']} ({s['distance_km']}km)" for s in sub_segments)
+    else:
+        segments_str = "(세부 구간 데이터 없음 - 타임라인 표는 Start/Finish 위주로 간략히 구성)"
 
-    user_msg = f"질문: {query}\n\n[검색 결과 컨텍스트]:\n{context_str}"
-    
+    system_prompt = f"""당신은 제주도 지자체 담당자 및 여행사 상품 기획자에게 제출할 '제주 영농-관광 상생 상품 기획서'를 작성하는 B2B 리포트 작성 전문가입니다.
+줄글 위주의 가이드북/블로그 서술을 금지하고, 대화체 인사말이나 구어체("~해요", "안녕하세요" 등) 없이 아래 규격을 엄격히 준수한
+표(Table) 중심의 실무 보고서 형태 Markdown 만 출력하세요.
+이 리포트는 이후 다른 파이프라인 단계에서 [☕ 로컬 상생 제휴 아이디어]와 [🌤️ 기후 리스크 및 Plan B] 섹션이 자동으로 이어 붙습니다.
+그 섹션들의 헤더/내용을 미리 작성하지 않는 것은 물론, 그 섹션들이 이어진다는 사실 자체도 언급하거나 예고하지 마세요
+(예: "~섹션은 별도 문서에서 확장됩니다", "다음 섹션에서 계속됩니다" 같은 전환 문구 금지). 2번 섹션 표가 끝나면 어떤 마무리 문구도 없이 그대로 출력을 종료하세요.
+
+[참고용 현재 계절 정보] (이후 단계에서 별도 섹션으로 다뤄지므로 여기서는 언급만 하고 상세 대책은 작성하지 마세요)
+- 계절 특성: {weather.get('description', '')}, 특이 유의사항: {', '.join(weather.get('warnings', [])) or '없음'}
+
+[제주 밭담문화·작물 생육 지식 DB 검색 결과]
+{culture_context_str}
+
+[코스 실제 세부 구간 목록 (구간명 + 시작점 기준 누적 거리 km, 순서대로)]
+{segments_str}
+
+[출력 규격 - 반드시 이 순서와 헤더를 그대로 사용]
+
+## 1. 📊 B2B 상품 개요 & 스펙
+- **상품명**: (대상 코스명과 매개 작물/테마를 조합한 직관적 B2B 상품명)
+- **상품 타겟**: (예상 타겟 고객군 제안, 예: "3040 힐링 트레커", "로컬 푸드 관심 단체/가족")
+- **권장 운용 시간**: (코스 거리/난이도 기반 현실적인 운용 시간대 제안, 예: "08:00~13:00")
+- **예상 1인 단가 범위**: (도슨트 해설 + 로컬 체험 패키지를 가정한 합리적 가격대 제안)
+- **핵심 셀링 포인트 (USP)**: (한 줄 요약)
+- 위 5개 항목은 확정된 사실이 아니라 기획 단계의 제안값임을 전제로 작성하세요.
+
+## 2. 📍 [타임라인/동선 연계] 로컬 영농 & 문화 도슨트 포인트
+- 아래 표로만 작성하세요 (줄글 설명 금지):
+
+| 구간 구분 | 위치 (km) | 주요 도슨트 & 영농·문화 포인트 | 기획자 현장 체크리스트 (B2B) |
+| :--- | :--- | :--- | :--- |
+| Start | 0.0km | ... | ... |
+| Point 1 | X.Xkm | ... | ... |
+| Point 2 | X.Xkm | ... | ... |
+| Finish | XX.Xkm | ... | ... |
+
+- **위치(km)와 구간 구분 열은 위 [코스 실제 세부 구간 목록]에 있는 구간명·km 값만 그대로 사용하세요. 목록에 없는 지점이나 km 값을 지어내지 마세요.**
+- 목록에서 Start, Finish, 그리고 중간 하이라이트 2~3곳(밭담/작물 경관이 두드러지는 지점 우선)을 선택해 4~6행으로 구성하세요.
+- "주요 도슨트 & 영농·문화 포인트" 열은 [제주 밭담문화·작물 생육 지식 DB 검색 결과]를 근거로 각 지점에 어울리는 해설 멘트를 작성하세요.
+- "기획자 현장 체크리스트" 열은 단체 운용 관점의 실무 메모(주차/포토타임/휴게/픽업 등)를 제안하세요.
+- 계층적 완화 적용 여부는 {fallback} 입니다. True인 경우에만 표 아래 한 줄 각주로 대안 제시 사유(완화 사유: {reason})를 명시하세요.
+  False인 경우 완화 관련 각주를 절대 출력하지 마세요 ("완화 사유: None" 같은 문구도 금지) — 표로 섹션을 바로 종료하세요.
+
+[작성 원칙]
+1. 섹션 헤더(## 1. ~, ## 2. ~)는 반드시 그대로 출력하세요.
+2. 코스 거리/시간/난이도/구간 km 등 컨텍스트에 있는 사실 수치를 지어내지 마세요. (단, 섹션 1의 타겟/시간/단가/USP는 애초에 사실 데이터가 아닌 기획 제안값이므로 예외)
+3. Markdown 표 문법이 깨지지 않도록 각 셀에 줄바꿈 없이 작성하세요."""
+
+    user_msg = f"[질문(방문 조건)]: {query}\n\n[검색 결과 컨텍스트]:\n{context_str}"
+
     docent_answer = get_chat_completion(system_prompt, user_msg)
     # local_recommender 가 스킵되는 경우에도 최종 응답이 비어있지 않도록 기본값으로 세팅
     return {"docent_answer": docent_answer, "final_response": docent_answer}
 
 
 def recommend_local_node(state: AgentState) -> Dict[str, Any]:
-    """코스 작물과 행정구역에 부합하는 로컬 매장(카페/음식점)을 자동 수집하고, 최종 답변과 Trust Tagging 을 결합하는 Local Recommender 노드입니다."""
+    """비짓제주 API(get_visit_jeju_recommendations, 실 API 우선/실패 시 Mock 폴백 내장)에서
+    코스 지역의 실제 로컬 상점 소개(introduction) 텍스트만 참고 재료로 가져와, 특정 매장명을
+    지목하지 않는 창의적 협업 아이디어를 LLM 으로 제안하고, 기후·동선 리스크 및 Trust Tagging 을
+    이어붙여 B2B 기획서를 완성하는 Local Recommender(=Report Finalizer) 노드입니다.
+    관광 API 데이터는 폐업/변경에 취약해 특정 매장을 "검증된 제휴처"로 단정할 수 없으므로,
+    매장명/주소/전화번호는 결과물에 노출하지 않고 지역 상점의 성격(introduction)만 아이디어의
+    참고 재료로 사용합니다.
+    """
     chunks = state["retrieved_chunks"]
     docent_answer = state["docent_answer"]
-    
+    weather = state["weather_info"] or {}
+    safety = state["safety_check"] or {}
+
     if not chunks or not docent_answer:
         return {"final_response": docent_answer, "recommendations": []}
-        
-    client = get_supabase_client()
+
     recommendations = []
-    
-    # 검색된 상위 코스들의 작물 및 행정구역 매핑 카페/맛집 정보 수집
+    introduction_snippets = []
     rec_cache: Dict[Any, Any] = {}
+
+    # 검색된 상위 코스들의 작물 및 행정구역 조합에 대해 비짓제주 소개 정보를 참고 재료로 수집
     for chunk in chunks:
-        course_id = chunk["course_id"]
         crops = [c.strip() for c in chunk["crops"].split(",") if c.strip()]
         areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
 
-        # 작물과 행정구역이 매칭되는 상점 로드 (동일 조합 중복 호출 방지)
         for crop in crops:
             for area in areas:
                 cache_key = (crop, area)
@@ -286,34 +494,69 @@ def recommend_local_node(state: AgentState) -> Dict[str, Any]:
                     rec_cache[cache_key] = get_visit_jeju_recommendations(crop, area)
                 rec_list = rec_cache[cache_key]
                 for rec in rec_list:
-                    # 중복 제거
-                    if not any(r["title"] == rec["title"] for r in recommendations):
-                        recommendations.append(rec)
-                        
-    # 최종 답변에 자연스럽게 로컬 상점 추천 섹션 결합
-    final_response = docent_answer + "\n\n"
-    if recommendations:
-        final_response += "🌾 **올레길에서 마주치는 재배 작물 연계 로컬 카페 및 맛집 추천**\n"
-        for rec in recommendations[:3]:  # 최대 3개 매장 노출
-            final_response += f"- **{rec['title']}** ({rec['crop_tag']} 테마 / {rec['administrative_area']})\n"
-            final_response += f"  - 주소: {rec['road_address'] or rec['address']}\n"
-            final_response += f"  - 소개: {rec['introduction']}\n"
-            if rec.get("phone"):
-                final_response += f"  - 전화번호: {rec['phone']}\n"
-    else:
-        final_response += "🌾 *현재 탐방지 주변에 등록된 작물 테마 로컬 카페/음식점 추천 정보가 존재하지 않습니다.*\n"
+                    recommendations.append(rec)
+                    intro = (rec.get("introduction") or "").strip()
+                    if intro and intro not in introduction_snippets:
+                        introduction_snippets.append(intro)
 
-    # 답변의 마지막 줄에 신뢰도 및 출처 표기 (Trust Tagging) 결합
-    final_response += "\n---\n"
-    # 유사도와 매칭 품질에 따라 별점 결정
-    stars = "★★★★★"
-    if state["fallback_applied"]:
-        stars = "★★★★☆"
-    final_response += f"[출처: 제주올레 가이드 / 농촌진흥청 농사로 / 비짓제주 API / 신뢰도: {stars}]"
-    
+    # ## 3. ☕ 로컬 상생 제휴 및 상품화 아이디어 (표)
+    if introduction_snippets:
+        reference_str = "\n".join(f"- {s}" for s in introduction_snippets[:6])
+        idea_system_prompt = """당신은 지역 상생 관광 상품을 기획하는 협업 아이디어 전문가입니다.
+아래 [지역 로컬 상점 소개 참고자료]는 관광 API에서 가져온 실제 상점들의 짧은 소개 텍스트입니다.
+이 자료의 성격(예: 비건 베이커리, 발효음료 카페 등)에서 착안하여, 코스의 매개 작물/테마와 어울리는
+실무 적용 가능한 로컬 상생 제휴/상품화 아이디어를 아래 Markdown 표로만 제안하세요 (설명 없이 표만 출력):
+
+| 구분 | 제휴 컨셉 / 메뉴 | 상생 협업 내용 (B2B) | 기대 효과 및 마케팅 포인트 |
+| :--- | :--- | :--- | :--- |
+| 푸드/음료 | ... | ... | ... |
+| 체험/문화 | ... | ... | ... |
+| 기념품 | ... | ... | ... |
+
+[절대 규칙]
+- 표는 위 예시와 동일하게 정확히 3행(푸드/음료, 체험/문화, 기념품 각 1행씩)만 작성하세요. 행을 추가하지 마세요.
+- 특정 매장명, 상호명, 주소, 전화번호를 절대 언급하거나 지목하지 마세요. 참고자료는 아이디어의
+  영감 재료일 뿐, 실제 매장이 지금도 운영 중인지 검증되지 않았습니다. "~카페 유형", "~테마 로컬 상점" 처럼
+  일반화된 표현만 사용하세요.
+- 표 셀 안에 줄바꿈을 넣지 마세요 (Markdown 표가 깨집니다).
+- 대화체 인사말이나 표 앞뒤 설명 문구 없이 표만 출력하세요."""
+        idea_user_msg = f"[코스 매개 작물/테마]: {chunks[0]['crops']}\n\n[지역 로컬 상점 소개 참고자료]:\n{reference_str}"
+        local_ideas = get_chat_completion(idea_system_prompt, idea_user_msg)
+    else:
+        local_ideas = "*현재 이 지역에 참고할 로컬 상점 소개 정보가 없어 아이디어 제안을 생략합니다.*"
+
+    report = docent_answer.rstrip() + "\n\n"
+    report += "## 3. ☕ 로컬 상생 제휴 및 상품화 아이디어\n"
+    report += "*(실제 매장 디렉토리가 아니라, 해당 지역 로컬 상점 성격에서 착안한 협업 컨셉 제안입니다. 개별 매장 운영 현황은 별도 확인이 필요합니다.)*\n\n"
+    report += local_ideas.rstrip() + "\n"
+
+    # ## 4. 🌤️ 기후 리스크 및 Plan B 우회 동선
+    total_distance = chunks[0].get("total_distance_km")
+    course_name = chunks[0].get("course_name", "코스")
+    report += "\n## 4. 🌤️ 기후 리스크 및 Plan B 우회 동선\n"
+    report += f"- **[기후 환경]**: {weather.get('description', '')}"
+    warnings = weather.get("warnings") or []
+    if warnings:
+        report += f" / 유의사항: {', '.join(warnings)}"
+    report += "\n"
+    report += f"- **[Plan A (정상 운용)]**: {course_name} 전체 코스 풀 도보 트레킹"
+    if total_distance:
+        report += f" ({total_distance}km)"
+    report += "\n"
+    if safety.get("reroute_required"):
+        plan_b = safety.get("alternative_query_override") or "해안 구간 대신 중산간/숲길 우회 동선"
+        report += f"- **[Plan B (우회/대체)]**: {safety.get('safety_status', 'WARNING')} 상황 시 {plan_b}으로 전환, 필요 시 실내 체험 프로그램으로 대체\n"
+    else:
+        report += "- **[Plan B (우회/대체)]**: 현재 특이 리스크는 없으나, 돌발 강풍·우천 시를 대비해 단축 동선 및 실내 체험/휴게 프로그램으로의 전환 대안을 상시 준비\n"
+
+    # ## 5. 🛡️ Trust Tagging (유사도와 완화 여부에 따라 신뢰도 별점 결정)
+    stars = "★★★★☆" if state["fallback_applied"] else "★★★★★"
+    report += "\n## 5. 🛡️ Trust Tagging\n"
+    report += f"[출처: 제주올레 가이드북 / 제주 밭담문화·작물 지식 DB / 비짓제주 기반 제휴 아이디어 / Self-RAG 신뢰도: {stars}]\n"
+
     return {
         "recommendations": recommendations,
-        "final_response": final_response
+        "final_response": report
     }
 
 

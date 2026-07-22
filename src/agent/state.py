@@ -9,13 +9,16 @@ class AgentState(TypedDict):
     parsed_constraints: Optional[Dict[str, Any]]
     intent_category: Optional[str]
     target_course: Optional[str]
-    
+    b2b_params: Optional[Dict[str, Any]]
+
     # 2. 날씨 및 안전 검증 정보
     weather_info: Optional[Dict[str, Any]]
     safety_check: Optional[Dict[str, Any]]
-    
+
     # 3. 검색 및 완화 정보
     retrieved_chunks: List[Dict[str, Any]]
+    culture_chunks: List[Dict[str, Any]]
+    sub_segments: List[Dict[str, Any]]
     fallback_applied: bool
     fallback_reason: Optional[str]
     

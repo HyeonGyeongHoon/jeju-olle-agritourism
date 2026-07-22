@@ -1,28 +1,33 @@
-import os
-import requests
 from typing import Dict, Any
 
-try:
-    import truststore
-    truststore.inject_into_ssl()
-except ImportError:
-    pass
-
-
-# 기상특보 조회서비스(getWthrWrnList) 의 stnId 는 기상청 관측지점코드를 사용합니다.
-# 제주도는 행정구역상 제주시/서귀포시 두 권역으로 나뉘므로 각 권역의 대표 지점코드로 매핑합니다.
-_JEJU_SI_STN_ID = "184"
-_SEOGWIPO_SI_STN_ID = "189"
-_SEOGWIPO_AREA_TOKENS = ["성산", "표선", "남원", "대정", "안덕"]
-
-_HAZARD_KEYWORDS = ["강풍", "호우", "태풍", "대설", "한파", "폭염", "황사", "건조", "안개", "풍랑", "폭풍해일", "지진해일"]
-
-
-def _resolve_stn_id(administrative_area: str) -> str:
-    """제주도 내 행정구역명을 기상특보 조회 지점코드(stnId)로 매핑합니다."""
-    if any(token in administrative_area for token in _SEOGWIPO_AREA_TOKENS):
-        return _SEOGWIPO_SI_STN_ID
-    return _JEJU_SI_STN_ID
+# 월별 제주도 계절 기후 특성 정적 참고 테이블입니다. 실시간 외부 기상 API 호출 없이,
+# 문서화된 계절 지식만으로 기후 및 동선 리스크를 판단하기 위해 사용합니다.
+_SEASONAL_CLIMATE_NOTES = {
+    12: {"status": "WARNING", "description": "한파와 북서풍이 강한 초겨울", "warnings": ["한파·강풍 유의 시기"],
+         "guideline": "방풍 장비를 갖추고 해안보다 중산간 코스를 우선 고려하세요."},
+    1: {"status": "WARNING", "description": "연중 가장 추운 한겨울", "warnings": ["한파·강풍 유의 시기"],
+        "guideline": "방풍 장비를 갖추고 해안보다 중산간 코스를 우선 고려하세요."},
+    2: {"status": "WARNING", "description": "늦겨울, 강풍이 잦은 시기", "warnings": ["강풍 유의 시기"],
+        "guideline": "해안 구간은 강풍에 대비하고, 중산간 우회 동선을 함께 안내하세요."},
+    3: {"status": "SAFE", "description": "포근하고 쾌청한 초봄", "warnings": [],
+        "guideline": "야외 도보 여행에 가장 쾌적한 시기입니다."},
+    4: {"status": "SAFE", "description": "온화하고 화창한 봄", "warnings": [],
+        "guideline": "특별한 리스크 없이 전 코스 탐방에 적합합니다."},
+    5: {"status": "SAFE", "description": "초여름 문턱의 쾌청한 늦봄", "warnings": [],
+        "guideline": "자외선 대비 외에 특별한 리스크는 없습니다."},
+    6: {"status": "WARNING", "description": "장마가 시작되는 시기", "warnings": ["장마철 집중호우 가능 시기"],
+        "guideline": "우천 시를 대비해 실내 체험 위주의 대안 동선을 함께 안내하세요."},
+    7: {"status": "WARNING", "description": "한여름 폭염기", "warnings": ["폭염 유의 시기"],
+        "guideline": "이른 아침·늦은 오후 시간대 탐방과 그늘 구간 위주 동선을 권장하세요."},
+    8: {"status": "WARNING", "description": "폭염과 열대야가 이어지는 한여름", "warnings": ["폭염 유의 시기"],
+        "guideline": "이른 아침·늦은 오후 시간대 탐방과 그늘 구간 위주 동선을 권장하세요."},
+    9: {"status": "WARNING", "description": "태풍 영향이 잦은 초가을", "warnings": ["태풍 영향 가능 시기"],
+        "guideline": "기상 특보 발효 시 해안 코스 대신 중산간·숲길 우회 동선을 준비하세요."},
+    10: {"status": "SAFE", "description": "선선하고 쾌청한 가을", "warnings": [],
+         "guideline": "단풍과 억새 풍경을 즐기기 좋은 시기입니다."},
+    11: {"status": "SAFE", "description": "선선한 늦가을·초겨울 초입", "warnings": [],
+         "guideline": "일교차에 대비한 방한 준비를 권장합니다."},
+}
 
 
 def _safe_default(description: str) -> Dict[str, Any]:
@@ -36,77 +41,27 @@ def _safe_default(description: str) -> Dict[str, Any]:
     }
 
 
-def get_current_weather(administrative_area: str = "제주") -> Dict[str, Any]:
-    """기상청 기상특보 조회서비스(getWthrWrnList) 를 연동하여 제주도 내 해당 권역의
-    실시간 기상 특보 발효 여부를 수집합니다.
-    API Key 가 설정되지 않았거나 호출 실패 시 기본 SAFE 상태를 반환합니다.
+def get_seasonal_climate_note(month: int) -> Dict[str, Any]:
+    """제주도의 월별 계절 기후 특성을 담은 정적 참고 테이블을 조회합니다.
+    실시간 기상청 API 를 호출하지 않고, 문서화된 계절 지식만으로 기후 및 동선 리스크를 판단합니다.
     """
-    api_key = os.getenv("KMA_API_KEY")
+    note = _SEASONAL_CLIMATE_NOTES.get(month)
+    if not note:
+        return _safe_default("맑음")
 
-    # 1. API 키가 설정되지 않은 경우, SAFE 상태를 기본으로 하는 Mock 데이터 반환
-    if not api_key:
-        return _safe_default("맑음 (Mock 데이터)")
-
-    # 공공데이터 포털 기상청_기상특보 조회서비스 (지점코드 기반 조회)
-    url = "http://apis.data.go.kr/1360000/WthrWrnInfoService/getWthrWrnList"
-    params = {
-        "ServiceKey": api_key,
-        "pageNo": "1",
-        "numOfRows": "10",
-        "dataType": "JSON",
-        "stnId": _resolve_stn_id(administrative_area)
+    return {
+        "status": note["status"],
+        "temperature": 22.0,
+        "precipitation_mm": 0.0,
+        "wind_speed_ms": 3.0,
+        "warnings": note["warnings"],
+        "description": note["description"],
+        "guideline": note["guideline"],
     }
-
-    try:
-        response = requests.get(url, params=params, timeout=3.0)
-        if response.status_code != 200:
-            print(f"[!] 기상청 API 호출 실패 (HTTP {response.status_code}): {response.text[:200]}")
-            return _safe_default("맑음")
-
-        data = response.json()
-        header = data.get("response", {}).get("header", {})
-        result_code = header.get("resultCode")
-
-        # 03 = 해당 지점에 발효 중인 특보 없음 (정상 케이스)
-        if result_code == "03":
-            return _safe_default("맑음")
-        if result_code != "00":
-            print(f"[!] 기상청 API 오류 응답: resultCode={result_code}, resultMsg={header.get('resultMsg')}")
-            return _safe_default("맑음")
-
-        items_container = data.get("response", {}).get("body", {}).get("items", {})
-        item_list = items_container.get("item", []) if isinstance(items_container, dict) else (items_container or [])
-        if isinstance(item_list, dict):
-            item_list = [item_list]
-
-        # 특보 제목에는 지역명이 포함되지 않으므로(stnId 로 이미 지역 필터링됨),
-        # 재해 유형 키워드 매칭 + 이미 해제된 특보 제외로 현재 유효한 특보만 추출합니다.
-        active_warnings = []
-        for item in item_list:
-            title = item.get("title", "")
-            if "해제" in title:
-                continue
-            if any(keyword in title for keyword in _HAZARD_KEYWORDS):
-                active_warnings.append(title)
-
-        if active_warnings:
-            return {
-                "status": "DANGER" if any("경보" in w or "태풍" in w for w in active_warnings) else "WARNING",
-                "temperature": 20.0,
-                "precipitation_mm": 10.0,
-                "wind_speed_ms": 14.0,
-                "warnings": active_warnings,
-                "description": "기상 특보 발효 중"
-            }
-
-    except Exception as e:
-        print(f"[!] 기상청 API 호출 중 오류 발생: {e}. SAFE 상태로 폴백 처리합니다.")
-
-    return _safe_default("맑음")
 
 
 def simulate_weather_by_query(query: str) -> Dict[str, Any]:
-    """사용자 질문 텍스트에 기상 위험 키워드가 있을 경우, 
+    """사용자 질문 텍스트에 기상 위험 키워드가 있을 경우,
     Safety Evaluator 노드가 올바르게 대처하는지 테스트하기 위한 날씨 시뮬레이션 유틸리티입니다.
     """
     if "태풍" in query or "폭우" in query or "홍수" in query:

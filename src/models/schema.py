@@ -46,21 +46,6 @@ class CourseSchema(BaseModel):
     lunch_info: str = Field(default="", description="식당 및 점심 정보")
 
 
-class CourseSubSegmentSchema(BaseModel):
-    """코스 부분 탐방 큐레이션을 위한 세부 구간 Pydantic 모델입니다."""
-
-    sub_segment_name: str = Field(
-        ..., description="세부 구간 명칭 (예: 2-A구간 광치기~오조한도교)"
-    )
-    start_point: str = Field(..., description="구간 시작점 명칭")
-    end_point: str = Field(..., description="구간 종점 명칭")
-    distance_km: float = Field(..., ge=0.0, description="구간 거리 (km)")
-    estimated_time_hours: float = Field(
-        ..., ge=0.0, description="예상 소요 시간 (시간)"
-    )
-    description: str = Field(default="", description="구간 주요 풍경 및 특징 설명")
-
-
 class WheelchairSegmentSchema(BaseModel):
     """휠체어 보행 구간 검증을 위한 Pydantic 모델입니다."""
 
@@ -74,10 +59,21 @@ class WheelchairSegmentSchema(BaseModel):
     )
 
 
-class SearchRequest(BaseModel):
-    """의도 라우팅 및 RAG 검색 API 요청 검증을 위한 모델입니다."""
+class B2BQueryParams(BaseModel):
+    """B2B 기획서 자연어 질의에서 추출한 핵심 파라미터 검증을 위한 Pydantic 모델입니다."""
 
-    query: str = Field(..., min_length=1, description="사용자의 자연어 챗봇 질문")
-    session_id: str = Field(
-        ..., min_length=1, description="멀티턴 대화 유지용 세션 식별자 (필수)"
+    target_month: int | None = Field(
+        default=None, ge=1, le=12, description="질의에서 언급된 방문 예정 월 (1~12)"
+    )
+    season: str | None = Field(
+        default=None, description="질의에서 언급된 계절 표현 (예: 가을, 봄)"
+    )
+    key_item_or_crop: str | None = Field(
+        default=None, description="질의의 핵심 매개 작물/테마 아이템 (예: 당근, 마늘, 밭담)"
+    )
+    preferred_location: str | None = Field(
+        default=None, description="질의에서 언급된 선호 지역/코스 (예: 구좌읍, 1코스, 동부)"
+    )
+    concept_theme: str | None = Field(
+        default=None, description="질의의 컨셉/테마 (예: 힐링, 평지 트레킹, 농가 체험)"
     )

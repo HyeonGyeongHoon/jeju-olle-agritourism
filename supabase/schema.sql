@@ -120,3 +120,44 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
+
+-- 8. 제주 밭담문화·작물 생육 지식 벡터 테이블 (신규 - 외부 API 대체용 검증 문서 DB)
+-- 주의: 기존 5개 테이블과 달리 DROP 구문이 없습니다. 이 블록만 단독으로 실행하세요 —
+-- 파일 상단부터 전체를 재실행하면 기존 테이블(및 데이터)이 모두 삭제됩니다.
+CREATE TABLE IF NOT EXISTS culture_crop_knowledge (
+    id SERIAL PRIMARY KEY,
+    crop_name VARCHAR(100),
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    embedding VECTOR(4096),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION match_culture_chunks (
+  query_embedding VECTOR(4096),
+  match_threshold FLOAT,
+  match_count INT
+)
+RETURNS TABLE (
+  id INT,
+  crop_name VARCHAR,
+  title VARCHAR,
+  content TEXT,
+  similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    culture_crop_knowledge.id,
+    culture_crop_knowledge.crop_name,
+    culture_crop_knowledge.title,
+    culture_crop_knowledge.content,
+    1 - (culture_crop_knowledge.embedding <=> query_embedding) AS similarity
+  FROM culture_crop_knowledge
+  WHERE 1 - (culture_crop_knowledge.embedding <=> query_embedding) > match_threshold
+  ORDER BY culture_crop_knowledge.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
