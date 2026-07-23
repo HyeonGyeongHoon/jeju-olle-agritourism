@@ -36,6 +36,7 @@ class ReportRequest(BaseModel):
 NODE_PROGRESS_LABELS = {
     "intent_router": "🔍 자연어 질의 분류 중...",
     "intent_parser": "🔍 자연어 키워드 분석 중... (시기·작물·지역·테마)",
+    "market_location_resolver": "📊 방문객 빅데이터 기준 지역 자동 검색 중...",
     "safety_evaluator": "🌤️ 계절별 기후 리스크 분석 중...",
     "retriever": "📚 올레 코스 & 밭담문화 DB 하이브리드 검색 중...",
     "docent_generator": "✍️ 로컬 영농·문화 도슨트 포인트 작성 중...",

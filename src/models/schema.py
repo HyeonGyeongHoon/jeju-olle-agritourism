@@ -4,6 +4,20 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class MarketLocationMetric(str, Enum):
+    """지역을 역으로 검색할 때 기준이 되는 visitor_analytics 컬럼 화이트리스트입니다."""
+
+    TOTAL_VISITORS = "total_visitors"
+    YOY_GROWTH_RATE = "yoy_growth_rate"
+    FEMALE_RATIO = "female_ratio"
+    MALE_RATIO = "male_ratio"
+    YOUTH_10S_RATIO = "youth_10s_ratio"
+    YOUNG_2030_RATIO = "young_2030_ratio"
+    MIDDLE_4060_RATIO = "middle_4060_ratio"
+    SENIOR_70S_RATIO = "senior_70s_ratio"
+    FOREIGN_VISITORS = "foreign_visitors"
+
+
 class IntentCategory(str, Enum):
     """사전 의도 라우팅(Stage 0) 분류 카테고리입니다."""
 
@@ -59,6 +73,26 @@ class WheelchairSegmentSchema(BaseModel):
     )
 
 
+class MarketLocationQuery(BaseModel):
+    """"외국인 관광객이 많았던 지역"처럼, 특정 지역명이 아니라 방문객 통계 기준으로 지역을
+    역으로 검색하려는 질의일 때만 채워지는 파라미터입니다. metric 이 None 이면 통계 기반 지역
+    검색이 필요 없는 일반 질의라는 뜻입니다.
+    """
+
+    metric: MarketLocationMetric | None = Field(
+        default=None, description="검색 기준이 되는 방문객 통계 지표 (없으면 통계 기반 검색 불필요)"
+    )
+    year: int | None = Field(
+        default=None, ge=2020, le=2100, description="검색 대상 연도 (없으면 올해로 간주)"
+    )
+    month: int | None = Field(
+        default=None, ge=1, le=12, description="검색 대상 월 (없으면 target_month 또는 이번 달로 간주)"
+    )
+    direction: Literal["desc", "asc"] = Field(
+        default="desc", description="desc=가장 많았던/높았던, asc=가장 적었던/낮았던"
+    )
+
+
 class B2BQueryParams(BaseModel):
     """B2B 기획서 자연어 질의에서 추출한 핵심 파라미터 검증을 위한 Pydantic 모델입니다."""
 
@@ -73,6 +107,10 @@ class B2BQueryParams(BaseModel):
     )
     preferred_location: str | None = Field(
         default=None, description="질의에서 언급된 선호 지역/코스 (예: 구좌읍, 1코스, 동부)"
+    )
+    market_location_query: MarketLocationQuery | None = Field(
+        default=None,
+        description="지역명이 아니라 방문객 통계 조건(예: 외국인 방문객 1위)으로 지역을 찾으려는 질의일 때 채워짐",
     )
     concept_theme: str | None = Field(
         default=None, description="질의의 컨셉/테마 (예: 힐링, 평지 트레킹, 농가 체험)"

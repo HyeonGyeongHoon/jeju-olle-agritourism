@@ -4,6 +4,7 @@ from src.models.schema import IntentCategory
 from src.agent.nodes import (
     route_intent_node,
     parse_intent_node,
+    resolve_market_location_node,
     evaluate_safety_node,
     retrieve_rag_node,
     generate_docent_node,
@@ -44,6 +45,7 @@ def build_agent_graph():
     # 1. 그래프 노드 추가
     workflow.add_node("intent_router", route_intent_node)
     workflow.add_node("intent_parser", parse_intent_node)
+    workflow.add_node("market_location_resolver", resolve_market_location_node)
     workflow.add_node("safety_evaluator", evaluate_safety_node)
     workflow.add_node("retriever", retrieve_rag_node)
     workflow.add_node("docent_generator", generate_docent_node)
@@ -54,7 +56,8 @@ def build_agent_graph():
     # 2. 고정 경로 엣지 연결
     workflow.set_entry_point("intent_router")
     workflow.add_edge("intent_router", "intent_parser")
-    workflow.add_edge("intent_parser", "safety_evaluator")
+    workflow.add_edge("intent_parser", "market_location_resolver")
+    workflow.add_edge("market_location_resolver", "safety_evaluator")
     workflow.add_edge("safety_evaluator", "retriever")
     workflow.add_edge("retriever", "docent_generator")
     workflow.add_edge("local_recommender", "quality_checker")

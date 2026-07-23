@@ -133,6 +133,17 @@ CREATE TABLE IF NOT EXISTS culture_crop_knowledge (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 8-1. crop_seven_docs.json 스키마 반영 (2026-07-23, 신규 - 기존 컬럼은 그대로 유지하는 추가 전용
+-- 마이그레이션). 주의: 이 ALTER 블록은 Supabase SQL 에디터에서 반드시 먼저(수동으로) 실행해야
+-- scripts/run_culture_db_ingestion.py 가 새 필드를 적재할 수 있습니다. crop_name 컬럼은 하위 호환을
+-- 위해 계속 유지하며, 신규 문서는 crop_name/target_crop 양쪽에 동일 값을 채웁니다.
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS knowledge_id VARCHAR(50);
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS category VARCHAR(50);
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS target_crop VARCHAR(100);
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS region_tag VARCHAR(255);
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS active_months INTEGER[];
+ALTER TABLE culture_crop_knowledge ADD COLUMN IF NOT EXISTS season_stage VARCHAR(255);
+
 CREATE OR REPLACE FUNCTION match_culture_chunks (
   query_embedding VECTOR(4096),
   match_threshold FLOAT,
@@ -143,7 +154,13 @@ RETURNS TABLE (
   crop_name VARCHAR,
   title VARCHAR,
   content TEXT,
-  similarity FLOAT
+  similarity FLOAT,
+  knowledge_id VARCHAR,
+  category VARCHAR,
+  target_crop VARCHAR,
+  region_tag VARCHAR,
+  active_months INTEGER[],
+  season_stage VARCHAR
 )
 LANGUAGE plpgsql
 AS $$
@@ -154,7 +171,13 @@ BEGIN
     culture_crop_knowledge.crop_name,
     culture_crop_knowledge.title,
     culture_crop_knowledge.content,
-    1 - (culture_crop_knowledge.embedding <=> query_embedding) AS similarity
+    1 - (culture_crop_knowledge.embedding <=> query_embedding) AS similarity,
+    culture_crop_knowledge.knowledge_id,
+    culture_crop_knowledge.category,
+    culture_crop_knowledge.target_crop,
+    culture_crop_knowledge.region_tag,
+    culture_crop_knowledge.active_months,
+    culture_crop_knowledge.season_stage
   FROM culture_crop_knowledge
   WHERE 1 - (culture_crop_knowledge.embedding <=> query_embedding) > match_threshold
   ORDER BY culture_crop_knowledge.embedding <=> query_embedding
