@@ -1,8 +1,10 @@
 """
 scripts/run_culture_db_ingestion.py
 =====================================
-data/culture_knowledge/crop_culture_docs.json 에 작성된 제주 밭담 문화 및 작물별 생육/문화 지식
-문서를 Solar Embedding(4096차원)으로 임베딩하여 Supabase `culture_crop_knowledge` 테이블에 적재합니다.
+data/culture_knowledge/crop_docs.json(작물별 생육/문화 지식) 과 culture_docs.json(밭담·곶자왈·
+해녀 등 비작물 농업문화 지식) 에 작성된 문서를 Solar Embedding(4096차원)으로 임베딩하여
+Supabase `culture_crop_knowledge` 테이블에 적재합니다. 두 파일은 로컬 관리 편의상 분리되어
+있을 뿐, DB 테이블/RPC는 구분 없이 하나로 적재합니다(crop_name 컬럼이 nullable).
 
 주의 (Gate B): 이 스크립트는 임베딩 API 호출 및 DB 적재를 수행하는 비가역적 작업입니다.
 사용자의 사전 승인 없이 자동 실행하지 마세요. 실행 전 supabase/schema.sql 의
@@ -17,17 +19,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
 
-DOCS_PATH = os.path.join(
+_CULTURE_KNOWLEDGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "culture_knowledge", "crop_culture_docs.json"
+    "data", "culture_knowledge"
 )
+DOCS_PATHS = [
+    os.path.join(_CULTURE_KNOWLEDGE_DIR, "crop_docs.json"),
+    os.path.join(_CULTURE_KNOWLEDGE_DIR, "culture_docs.json"),
+]
 
 
 def run():
-    with open(DOCS_PATH, "r", encoding="utf-8") as f:
-        docs = json.load(f)
+    docs = []
+    for path in DOCS_PATHS:
+        with open(path, "r", encoding="utf-8") as f:
+            file_docs = json.load(f)
+        print(f"[*] {os.path.basename(path)}: {len(file_docs)}건 로드")
+        docs.extend(file_docs)
 
-    print(f"[*] 적재 대상 문서 {len(docs)}건 로드 완료")
+    print(f"[*] 적재 대상 문서 총 {len(docs)}건 로드 완료")
 
     client = get_supabase_client()
 
