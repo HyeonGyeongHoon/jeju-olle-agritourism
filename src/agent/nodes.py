@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import date
 from typing import Dict, Any, List
 from src.agent.llm_client import get_chat_completion
@@ -50,6 +51,8 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
 6. key_item_or_crop: 질문의 핵심 매개 작물/테마 아이템 (예: "당근", "마늘", "밭담", "숲길", "해안", 없으면 null)
 7. preferred_location: 질문에 언급된 선호 지역/코스 (예: "구좌읍", "1코스", "동부", 없으면 null)
 8. concept_theme: 질문의 컨셉/테마 (예: "힐링", "평지 트레킹", "농가 체험", 없으면 null)
+9. target_audience: 질문에서 유추되는 주 타겟 고객층 ("family", "corporate", "healing", "senior", "active" 중 하나, 명시 없으면 "family")
+10. include_market_insights: 질문이 명시적으로 "빅데이터/통계/시장 데이터 빼줘" 등으로 제외를 요청하지 않는 한 true
 
 [응답 포맷 (JSON 전용)]
 {
@@ -66,7 +69,9 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
   "season": string or null,
   "key_item_or_crop": string or null,
   "preferred_location": string or null,
-  "concept_theme": string or null
+  "concept_theme": string or null,
+  "target_audience": string,
+  "include_market_insights": boolean
 }"""
 
     try:
@@ -87,6 +92,8 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
             key_item_or_crop=parsed.get("key_item_or_crop"),
             preferred_location=parsed.get("preferred_location"),
             concept_theme=parsed.get("concept_theme"),
+            target_audience=parsed.get("target_audience") or "family",
+            include_market_insights=parsed.get("include_market_insights", True),
         ).model_dump()
     except Exception as e:
         print(f"[!] 의도 파싱 중 오류 발생: {e}. 기본 제약 조건으로 폴백합니다.")
@@ -143,27 +150,65 @@ def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-_LOCAL_CULTURE_DOCS_PATH = os.path.join(
+_LOCAL_CULTURE_KNOWLEDGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "data", "culture_knowledge", "crop_culture_docs.json"
+    "data", "culture_knowledge"
 )
+# 작물별 문서(crop_docs.json)와 비작물 일반 농업문화 문서(culture_docs.json, crop_name=null)를
+# 별도 파일로 분리 관리합니다. Supabase culture_crop_knowledge 테이블/RPC는 두 종류를 구분하지
+# 않고(crop_name이 nullable) 그대로 하나의 테이블에 적재합니다.
+_LOCAL_CROP_DOCS_PATH = os.path.join(_LOCAL_CULTURE_KNOWLEDGE_DIR, "crop_docs.json")
+_LOCAL_GENERAL_CULTURE_DOCS_PATH = os.path.join(_LOCAL_CULTURE_KNOWLEDGE_DIR, "culture_docs.json")
+
+
+_TITLE_TRAILING_PARTICLES = ("와", "과", "은", "는", "이", "가", "을", "를", "의", "에서", "에", "으로", "로")
+
+
+def _title_keywords(title: str) -> List[str]:
+    """제목에서 매칭용 키워드 후보를 뽑습니다. 조사가 붙은 토큰("화산회토와")은 어간("화산회토")만
+    남기고, 범용 단어("문화", "개론")는 제외해 실제 주제어만 남깁니다."""
+    tokens = re.split(r"[\s'\"()·\-]+", title)
+    keywords = []
+    for token in tokens:
+        if not token or token in ("문화", "개론"):
+            continue
+        for particle in sorted(_TITLE_TRAILING_PARTICLES, key=len, reverse=True):
+            if token.endswith(particle) and len(token) - len(particle) >= 2:
+                token = token[: -len(particle)]
+                break
+        if len(token) >= 2:
+            keywords.append(token)
+    return keywords
+
+
+def _load_local_culture_docs() -> List[Dict[str, Any]]:
+    """작물 문서(crop_docs.json)와 비작물 일반 농업문화 문서(culture_docs.json)를 합쳐 반환합니다."""
+    docs: List[Dict[str, Any]] = []
+    for path in (_LOCAL_CROP_DOCS_PATH, _LOCAL_GENERAL_CULTURE_DOCS_PATH):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                docs.extend(json.load(f))
+        except Exception as e:
+            print(f"[!] 로컬 문화 지식 문서 로드 실패({path}): {e}")
+    return docs
 
 
 def _search_local_culture_docs(key_item_or_crop: str | None, query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
     """culture_crop_knowledge 벡터 DB 가 아직 적재되지 않았거나 조회에 실패했을 때, 로컬 문서
-    (data/culture_knowledge/crop_culture_docs.json)에서 키워드 매칭으로 대체 검색하는 폴백입니다.
-    DB 적재가 완료되면 retrieve_rag_node 의 pgvector 검색이 우선 시도되고, 이 함수는 자동으로
-    호출되지 않습니다.
+    (data/culture_knowledge/crop_docs.json + culture_docs.json)에서 키워드 매칭으로 대체 검색하는
+    폴백입니다. DB 적재가 완료되면 retrieve_rag_node 의 pgvector 검색이 우선 시도되고, 이 함수는
+    자동으로 호출되지 않습니다.
+    작물 문서는 crop_name 일치로, 비작물 일반 문화 문서(밭담/곶자왈/해녀 등, crop_name=None)는
+    제목 키워드가 질의에 등장하는지로 점수를 매겨, 특정 작물 언급이 없는 질의에서도 관련 있는
+    일반 문화 문서가 매번 같은 순서로만 채워지지 않고 실제로 매칭되도록 합니다.
     """
-    try:
-        with open(_LOCAL_CULTURE_DOCS_PATH, "r", encoding="utf-8") as f:
-            docs = json.load(f)
-    except Exception as e:
-        print(f"[!] 로컬 문화 지식 문서 로드 실패: {e}")
+    docs = _load_local_culture_docs()
+    if not docs:
         return []
 
-    matched = []
-    general = []
+    search_text = f"{key_item_or_crop or ''} {query_text or ''}"
+
+    scored = []
     for i, doc in enumerate(docs):
         crop_name = doc.get("crop_name")
         entry = {
@@ -173,16 +218,22 @@ def _search_local_culture_docs(key_item_or_crop: str | None, query_text: str, to
             "content": doc["content"],
             "similarity": 1.0
         }
-        if crop_name is None:
-            general.append(entry)
-        elif (key_item_or_crop and (key_item_or_crop in crop_name or crop_name in key_item_or_crop)) or (
-            crop_name in (query_text or "")
-        ):
-            matched.append(entry)
+        score = 0
+        if crop_name:
+            if key_item_or_crop and (key_item_or_crop in crop_name or crop_name in key_item_or_crop):
+                score += 3
+            if crop_name in (query_text or ""):
+                score += 2
+        else:
+            score += sum(1 for kw in _title_keywords(doc["title"]) if kw in search_text)
+        scored.append((score, i, entry))
 
+    matched = [entry for score, _i, entry in scored if score > 0]
     results = matched[:top_k]
     if len(results) < top_k:
-        results += general[: top_k - len(results)]
+        # 매칭된 것이 부족하면, 매칭되지 않은 일반 문화 문서로 원본 순서대로 채웁니다.
+        remaining_general = [entry for score, _i, entry in scored if score == 0 and entry["crop_name"] is None]
+        results += remaining_general[: top_k - len(results)]
     return results
 
 
@@ -201,6 +252,30 @@ def _crop_location_boost(chunk: Dict[str, Any], key_item_or_crop: str | None, pr
     return boost
 
 
+def _fetch_market_insight(client: Any, region_dong: str | None, target_month: int | None) -> Dict[str, Any] | None:
+    """제주관광공사 이동통신 빅데이터(visitor_analytics) 에서 해당 행정동·월의 방문객 통계를
+    조회합니다. `visitor_analytics` 테이블이 아직 적재되지 않았거나(Gate B 승인 대기 중) 조회에
+    실패해도 그래프 전체가 중단되지 않도록 예외를 삼키고 None 을 반환합니다. 같은 월이라도
+    연도가 여러 건 있을 수 있어 가장 최근 연도 값을 사용합니다.
+    """
+    if not region_dong or not target_month:
+        return None
+    try:
+        res = (
+            client.table("visitor_analytics")
+            .select("*")
+            .eq("region_dong", region_dong)
+            .like("year_month", f"%-{target_month:02d}")
+            .order("year_month", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"[!] Market Insight(visitor_analytics) 조회 실패, 생략합니다: {e}")
+        return None
+
+
 def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     """RDB 메타 필터링과 pgvector 유사도 검색을 조합하여 관련 코스 정보를 조회하며,
     결과가 없을 시 계층적으로 소프라 제약을 완화(Fallback)하는 Retriever 노드입니다.
@@ -213,6 +288,7 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     b2b_params = state.get("b2b_params") or {}
     key_item_or_crop = b2b_params.get("key_item_or_crop")
     preferred_location = b2b_params.get("preferred_location")
+    target_month = b2b_params.get("target_month")
 
     hard = constraints.get("hard_constraints", {})
     soft = constraints.get("soft_constraints", {})
@@ -223,6 +299,11 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         vector_query = safety["alternative_query_override"]
 
     client = get_supabase_client()
+
+    # 제주관광공사 방문객 빅데이터(Market Insight) 조회 - 선호 지역/방문월이 있을 때만 시도
+    market_insight = None
+    if b2b_params.get("include_market_insights", True):
+        market_insight = _fetch_market_insight(client, preferred_location, target_month)
 
     # RDB 기반 계층적 필터링 및 Fallback 로직
     fallback_applied = False
@@ -335,7 +416,8 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         "culture_chunks": culture_chunks_data,
         "sub_segments": sub_segments_data,
         "fallback_applied": fallback_applied,
-        "fallback_reason": fallback_reason
+        "fallback_reason": fallback_reason,
+        "market_insight": market_insight
     }
 
 
@@ -381,6 +463,10 @@ def generate_docent_node(state: AgentState) -> Dict[str, Any]:
     fallback = state["fallback_applied"]
     reason = state["fallback_reason"]
     weather = state["weather_info"] or {}
+    market_insight = state.get("market_insight")
+    b2b_params = state.get("b2b_params") or {}
+    target_audience = b2b_params.get("target_audience") or "family"
+    include_market_insights = b2b_params.get("include_market_insights", True)
 
     if not chunks:
         fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
@@ -406,6 +492,55 @@ def generate_docent_node(state: AgentState) -> Dict[str, Any]:
     else:
         segments_str = "(세부 구간 데이터 없음 - 타임라인 표는 Start/Finish 위주로 간략히 구성)"
 
+    # 제주관광공사 방문객 빅데이터(Market Insight) 컨텍스트 빌드 - 섹션 1 하단에 필수 기재
+    # 타겟 고객층에 따라 강조할 지표를 코드에서 결정해 지시문으로 넘김 (LLM이 임의로 고르지 않도록).
+    # 단, 그 행정동/월에 원본 순위표 데이터가 없어 실제로는 None인 지표를 "두드러진다"는 식으로
+    # 단정하지 않도록, 강조 후보는 market_insight 에 실제로 값이 있는 지표로만 제한합니다.
+    _AUDIENCE_RATIO_PRIORITY = {
+        "family": ["youth_10s_ratio", "middle_4060_ratio"],
+        "corporate": ["middle_4060_ratio"],
+        "healing": ["young_2030_ratio", "middle_4060_ratio"],
+        "senior": ["senior_70s_ratio", "middle_4060_ratio"],
+        "active": ["young_2030_ratio"],
+    }
+    _RATIO_FIELD_LABELS = {
+        "youth_10s_ratio": "10대 이하 비중",
+        "young_2030_ratio": "2030대 비중",
+        "middle_4060_ratio": "40~60대 비중",
+        "senior_70s_ratio": "70대 이상 비중",
+    }
+    if not include_market_insights or not market_insight:
+        market_insight_context_str = "(빅데이터 지표 없음 - 정성적 제안만 작성하고 수치는 지어내지 마세요)"
+        emphasis_instruction = ""
+    else:
+        parts = [f"{market_insight['region_dong']} {market_insight['year_month']} 방문객 {market_insight['total_visitors']:,}명"]
+        if market_insight.get("yoy_growth_rate") is not None:
+            parts.append(f"(전년 대비 {market_insight['yoy_growth_rate']}%)")
+        if market_insight.get("female_ratio") is not None:
+            parts.append(f"여성 비중 {market_insight['female_ratio']}%")
+        if market_insight.get("young_2030_ratio") is not None:
+            parts.append(f"2030 청년층 비중 {market_insight['young_2030_ratio']}%")
+        if market_insight.get("middle_4060_ratio") is not None:
+            parts.append(f"4060대 비중 {market_insight['middle_4060_ratio']}%")
+        if market_insight.get("senior_70s_ratio") is not None:
+            parts.append(f"70대 이상 비중 {market_insight['senior_70s_ratio']}%")
+        if market_insight.get("foreign_visitors") is not None:
+            parts.append(f"외국인 방문객 {market_insight['foreign_visitors']:,}명")
+        market_insight_context_str = "📊 " + ", ".join(parts)
+
+        # 강조 후보 지표 중 실제로 값이 있는 것만 선택 (없는 지표를 "두드러진다"고 단정 금지)
+        priority_fields = _AUDIENCE_RATIO_PRIORITY.get(target_audience, _AUDIENCE_RATIO_PRIORITY["family"])
+        available_labels = [
+            _RATIO_FIELD_LABELS[f] for f in priority_fields if market_insight.get(f) is not None
+        ]
+        if available_labels:
+            emphasis_instruction = "과 ".join(available_labels) + " (이 값들만 실제 데이터이니 이 항목만 언급하세요)"
+        else:
+            emphasis_instruction = (
+                "해당 타겟층 연령대 비율 데이터 없음 - 방문객 수/증감률/외국인 수만 언급하고 "
+                "연령대 비중은 절대 언급하지 마세요"
+            )
+
     system_prompt = f"""당신은 제주도 지자체 담당자 및 여행사 상품 기획자에게 제출할 '제주 영농-관광 상생 상품 기획서'를 작성하는 B2B 리포트 작성 전문가입니다.
 줄글 위주의 가이드북/블로그 서술을 금지하고, 대화체 인사말이나 구어체("~해요", "안녕하세요" 등) 없이 아래 규격을 엄격히 준수한
 표(Table) 중심의 실무 보고서 형태 Markdown 만 출력하세요.
@@ -422,6 +557,10 @@ def generate_docent_node(state: AgentState) -> Dict[str, Any]:
 [코스 실제 세부 구간 목록 (구간명 + 시작점 기준 누적 거리 km, 순서대로)]
 {segments_str}
 
+[제주관광공사 이동통신 빅데이터 - 방문객 통계 (Market Insight 근거)]
+{market_insight_context_str}
+- 주 타겟 고객층: {target_audience} → 강조할 지표: {emphasis_instruction or "(없음 - 정성적 제안만)"}
+
 [출력 규격 - 반드시 이 순서와 헤더를 그대로 사용]
 
 ## 1. 📊 B2B 상품 개요 & 스펙
@@ -430,7 +569,8 @@ def generate_docent_node(state: AgentState) -> Dict[str, Any]:
 - **권장 운용 시간**: (코스 거리/난이도 기반 현실적인 운용 시간대 제안, 예: "08:00~13:00")
 - **예상 1인 단가 범위**: (도슨트 해설 + 로컬 체험 패키지를 가정한 합리적 가격대 제안)
 - **핵심 셀링 포인트 (USP)**: (한 줄 요약)
-- 위 5개 항목은 확정된 사실이 아니라 기획 단계의 제안값임을 전제로 작성하세요.
+- **[Market Insight (제주관광공사 빅데이터 연계)]**: 위 [제주관광공사 이동통신 빅데이터] 컨텍스트를 근거로 방문객 수/증감률과, "강조할 지표"로 지정된 항목을 한 문장으로 요약하세요. 컨텍스트가 "(빅데이터 지표 없음...)"이면 이 항목에 "관련 빅데이터 지표가 확인되지 않아 정성적으로 제안합니다"라고만 쓰고 수치를 지어내지 마세요.
+- 위 5개 항목(상품명~USP)은 확정된 사실이 아니라 기획 단계의 제안값이지만, Market Insight 항목은 반드시 컨텍스트에 있는 실제 수치만 인용하세요.
 
 ## 2. 📍 [타임라인/동선 연계] 로컬 영농 & 문화 도슨트 포인트
 - 아래 표로만 작성하세요 (줄글 설명 금지):
@@ -451,7 +591,7 @@ def generate_docent_node(state: AgentState) -> Dict[str, Any]:
 
 [작성 원칙]
 1. 섹션 헤더(## 1. ~, ## 2. ~)는 반드시 그대로 출력하세요.
-2. 코스 거리/시간/난이도/구간 km 등 컨텍스트에 있는 사실 수치를 지어내지 마세요. (단, 섹션 1의 타겟/시간/단가/USP는 애초에 사실 데이터가 아닌 기획 제안값이므로 예외)
+2. 코스 거리/시간/난이도/구간 km, Market Insight 방문객 수치 등 컨텍스트에 있는 사실 수치를 지어내지 마세요. (단, 섹션 1의 상품명/타겟/시간/단가/USP는 애초에 사실 데이터가 아닌 기획 제안값이므로 예외)
 3. Markdown 표 문법이 깨지지 않도록 각 셀에 줄바꿈 없이 작성하세요."""
 
     user_msg = f"[질문(방문 조건)]: {query}\n\n[검색 결과 컨텍스트]:\n{context_str}"

@@ -66,6 +66,7 @@ async def report_event_generator(query: str):
         "culture_chunks": [],
         "fallback_applied": False,
         "fallback_reason": None,
+        "market_insight": None,
         "docent_answer": None,
         "recommendations": [],
         "final_response": None,

@@ -21,6 +21,7 @@ class AgentState(TypedDict):
     sub_segments: List[Dict[str, Any]]
     fallback_applied: bool
     fallback_reason: Optional[str]
+    market_insight: Optional[Dict[str, Any]]
     
     # 4. 답변 생성 및 로컬 추천 정보
     docent_answer: Optional[str]

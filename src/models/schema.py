@@ -77,3 +77,30 @@ class B2BQueryParams(BaseModel):
     concept_theme: str | None = Field(
         default=None, description="질의의 컨셉/테마 (예: 힐링, 평지 트레킹, 농가 체험)"
     )
+    target_audience: str = Field(
+        default="family",
+        description="기획서의 주 타겟 고객층 (family, corporate, healing, senior, active)",
+    )
+    include_market_insights: bool = Field(
+        default=True,
+        description="제주관광공사 방문객 빅데이터(Market Insight) 섹션 포함 여부",
+    )
+
+
+class VisitorAnalyticsSchema(BaseModel):
+    """제주관광공사 이동통신 빅데이터 기반 행정동별 방문객 통계 검증을 위한 Pydantic 모델입니다.
+    성별/연령대 비율은 원본 PDF의 상위 랭킹 표에 등장하는 행정동에 대해서만 존재하므로
+    (나머지는 그 달 데이터 자체가 없음) 모두 선택 필드입니다.
+    """
+
+    year_month: str = Field(..., pattern=r"^\d{4}-\d{2}$", description="예: 2026-05")
+    region_dong: str = Field(..., description="행정동명 (예: 구좌읍, 애월읍)")
+    total_visitors: int = Field(..., ge=0, description="당월 총 방문객 수")
+    yoy_growth_rate: float | None = Field(default=None, description="전년 대비 증감률 (%)")
+    female_ratio: float | None = Field(default=None, ge=0, le=100)
+    male_ratio: float | None = Field(default=None, ge=0, le=100)
+    youth_10s_ratio: float | None = Field(default=None, ge=0, le=100)
+    young_2030_ratio: float | None = Field(default=None, ge=0, le=100)
+    middle_4060_ratio: float | None = Field(default=None, ge=0, le=100)
+    senior_70s_ratio: float | None = Field(default=None, ge=0, le=100)
+    foreign_visitors: int | None = Field(default=None, ge=0)

@@ -1,0 +1,67 @@
+[
+  {
+    "year_month": "2026-03",
+    "region_dong": "애월읍",
+    "total_visitors": 798109,
+    "yoy_growth_rate": 13.8,
+    "female_ratio": null,
+    "male_ratio": null,
+    "youth_10s_ratio": null,
+    "young_2030_ratio": null,
+    "middle_4060_ratio": null,
+    "senior_70s_ratio": null,
+    "foreign_visitors": 9443
+  },
+  {
+    "year_month": "2026-03",
+    "region_dong": "구좌읍",
+    "total_visitors": 460038,
+    "yoy_growth_rate": 2.1,
+    "female_ratio": 56.4,
+    "male_ratio": 43.6,
+    "youth_10s_ratio": null,
+    "young_2030_ratio": null,
+    "middle_4060_ratio": null,
+    "senior_70s_ratio": null,
+    "foreign_visitors": 3260
+  },
+  {
+    "year_month": "2026-03",
+    "region_dong": "성산읍",
+    "total_visitors": 465343,
+    "yoy_growth_rate": 4.9,
+    "female_ratio": 54.8,
+    "male_ratio": 45.2,
+    "youth_10s_ratio": null,
+    "young_2030_ratio": null,
+    "middle_4060_ratio": null,
+    "senior_70s_ratio": null,
+    "foreign_visitors": 4263
+  },
+  {
+    "year_month": "2026-03",
+    "region_dong": "안덕면",
+    "total_visitors": 700239,
+    "yoy_growth_rate": 17.4,
+    "female_ratio": 54.4,
+    "male_ratio": 45.6,
+    "youth_10s_ratio": null,
+    "young_2030_ratio": null,
+    "middle_4060_ratio": null,
+    "senior_70s_ratio": null,
+    "foreign_visitors": 12781
+  },
+  {
+    "year_month": "2026-03",
+    "region_dong": "표선면",
+    "total_visitors": 340799,
+    "yoy_growth_rate": 11.6,
+    "female_ratio": 54.4,
+    "male_ratio": 45.6,
+    "youth_10s_ratio": null,
+    "young_2030_ratio": null,
+    "middle_4060_ratio": null,
+    "senior_70s_ratio": null,
+    "foreign_visitors": 2945
+  }
+]
