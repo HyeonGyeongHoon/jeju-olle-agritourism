@@ -127,6 +127,32 @@ def test_stream_until_cancelled_yields_everything_when_never_cancelled():
 
 # --- report_event_generator cancellation wiring ---
 
+def test_report_event_generator_sends_generic_error_message_to_client():
+    """회귀 방지: 그래프 실행 중 발생한 내부 예외의 상세 문구(DB/API 에러 등 민감할 수 있는
+    내용)가 그대로 클라이언트에게 노출되면 안 되고, 일반화된 메시지만 SSE event: error 로
+    전달되어야 합니다(인증 없이도 호출 가능한 엔드포인트라 정보 노출 위험이 있었음)."""
+    sensitive_detail = "relation \"secret_internal_table\" does not exist at postgres://internal-host"
+
+    def fake_stream(inputs):
+        raise RuntimeError(sensitive_detail)
+        yield {}  # pragma: no cover - 제너레이터로 만들기 위한 도달 불가 코드
+
+    async def scenario():
+        events = []
+        with patch("src.main.agent_runtime") as mock_runtime:
+            mock_runtime.stream.side_effect = fake_stream
+            async for chunk in report_event_generator("테스트 질의"):
+                events.append(chunk)
+        return events
+
+    events = asyncio.run(scenario())
+
+    error_events = [e for e in events if e.startswith("event: error")]
+    assert len(error_events) == 1
+    assert sensitive_detail not in error_events[0]
+    assert "오류가 발생했습니다" in error_events[0]
+
+
 def test_report_event_generator_sets_cancel_event_on_early_close():
     """클라이언트가 응답을 끝까지 소비하지 않고 제너레이터를 일찍 닫아도(연결 끊김 상황을 흉내),
     cancel_event 가 세팅되어 백그라운드 스레드에 중단 신호가 전달되어야 한다."""

@@ -199,7 +199,11 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
         yield "event: end\ndata: {}\n\n"
 
     except Exception as e:
-        error_msg = f"에러가 발생했습니다: {str(e)}"
+        # 상세 예외 내용(내부 DB/API 에러 문구, 스택 등)은 서버 로그에만 남기고, 인증 없이도
+        # 호출 가능한 이 엔드포인트를 통해 클라이언트에게는 일반화된 메시지만 노출합니다 —
+        # 내부 구현 세부사항이 그대로 새어나가는 정보 노출을 막기 위함입니다.
+        print(f"[!] report_event_generator 처리 중 오류 발생: {e}")
+        error_msg = "요청을 처리하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
         yield f"event: error\ndata: {json.dumps({'message': error_msg}, ensure_ascii=False)}\n\n"
     finally:
         # 정상 종료/예외뿐 아니라 클라이언트 연결 끊김(GeneratorExit/CancelledError)에도 반드시

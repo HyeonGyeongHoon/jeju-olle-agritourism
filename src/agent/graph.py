@@ -56,7 +56,9 @@ def should_continue(state: AgentState) -> str:
     intent = state.get("intent_category")
 
     # 1. 품질 검증을 통과했거나 자율 순환 한계(3회) 도달 시 종료
-    if report and report.get("passed", True):
+    # report.get("passed", False): "passed" 키가 없는 손상된 report 는 fail-closed 하게
+    # 실패로 간주합니다(예전엔 기본값 True 라서 malformed dict 를 통과로 오인했음).
+    if report and report.get("passed", False):
         print(f"[+] 품질 검증 통과! (최종 루프 횟수: {loop_count})")
         return "end"
     if loop_count >= 3:

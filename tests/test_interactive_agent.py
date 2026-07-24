@@ -29,6 +29,38 @@ def test_state_cleanup_in_classifier():
     assert res.get("tool_depth") == 0
 
 
+def test_classify_intent_node_ignores_invalid_preset_category_and_reclassifies():
+    """회귀 방지: 호출부가 IntentCategory enum 에 없는 값(오타/구버전 카테고리명 등)을
+    intent_category 로 미리 채워 넘겨도, 예전처럼 그대로 신뢰하지 말고 route_intent 로
+    다시 분류해야 합니다."""
+    state: AgentState = {
+        "query": "감귤 수확 시기가 언제야?",
+        "intent_category": "info_lookup_node",  # enum 에 없는 구버전/오타 값
+    }
+    with patch.object(
+        nodes, "route_intent",
+        return_value=type("R", (), {"category": IntentCategory.INFO_LOOKUP, "target_course": None})(),
+    ) as mock_route:
+        res = classify_intent_node(state)
+
+    mock_route.assert_called_once()
+    assert res["intent_category"] == IntentCategory.INFO_LOOKUP.value
+
+
+def test_classify_intent_node_trusts_valid_preset_category():
+    """호출부가 IntentCategory enum 에 속하는 유효한 값을 미리 채워 넘기면, 그대로
+    신뢰하고 route_intent(LLM 호출)를 다시 부르지 않아야 합니다."""
+    state: AgentState = {
+        "query": "구좌읍 5월 방문객 수 알려줘",
+        "intent_category": IntentCategory.INFO_LOOKUP.value,
+    }
+    with patch.object(nodes, "route_intent") as mock_route:
+        res = classify_intent_node(state)
+
+    mock_route.assert_not_called()
+    assert res["intent_category"] == IntentCategory.INFO_LOOKUP.value
+
+
 def test_tool_executor_node_multi_call():
     """tool_executor_node 가 방문객 통계 도구와 작물 지식 도구의 다중/병렬 tool_calls 목록을 받아 각각 실행하는지 검증합니다."""
     state: AgentState = {
@@ -211,3 +243,14 @@ def test_hybrid_correction_never_loops_forever_once_loop_count_advances():
             "loop_count": loop_count_2,
             "intent_category": IntentCategory.INFO_LOOKUP.value,
         }) == "rewrite"
+
+
+def test_should_continue_fails_closed_on_malformed_quality_report():
+    """회귀 방지: quality_report 에 "passed" 키가 아예 없는(손상된) dict 가 와도,
+    예전처럼 통과(True)로 오인하지 않고 실패로 간주해 교정 루프를 계속 돌아야 합니다."""
+    state: AgentState = {
+        "quality_report": {"score": 0.9},  # "passed" 키 없음
+        "loop_count": 0,
+        "intent_category": IntentCategory.INFO_LOOKUP.value,
+    }
+    assert should_continue(state) == "direct_retry"

@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Dict, Any, List
 from src.agent.llm_client import get_chat_completion
@@ -9,7 +10,7 @@ from src.agent.weather_client import simulate_weather_by_query, get_seasonal_cli
 from src.agent.router import route_intent
 from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
-from src.models.schema import B2BQueryParams
+from src.models.schema import B2BQueryParams, IntentCategory
 from src.agent.state import AgentState
 
 
@@ -18,11 +19,14 @@ def classify_intent_node(state: AgentState) -> Dict[str, Any]:
     (분류 결과로 state의 intent_category 에 라벨을 붙이며, 실제 물리적 분기는
     graph.py의 route_after_location_resolve 에서 수행합니다.)
     호출부(B2B 구조화 입력 등)가 intent_category 를 이미 확정해 넘긴 경우, LLM 분류 호출 없이
-    그대로 통과시킵니다.
+    그대로 통과시키되, IntentCategory enum 에 없는 값(오타/구버전 카테고리명 등)이면 신뢰하지 않고
+    route_intent 로 새로 분류합니다 — 잘못된 문자열이 하류의 문자열 비교 분기들을 예측 불가능하게
+    만드는 것을 막기 위함입니다.
     """
-    if state.get("intent_category"):
+    preset_category = state.get("intent_category")
+    if preset_category and preset_category in {c.value for c in IntentCategory}:
         return {
-            "intent_category": state["intent_category"],
+            "intent_category": preset_category,
             "target_course": state.get("target_course"),
             "tool_calls": None,
             "tool_outputs": None,
@@ -526,6 +530,27 @@ def _crop_label_matches(
     return not key_is_known_crop
 
 
+def _fetch_course_meta_by_name(client: Any, course_name: str) -> Dict[str, Any] | None:
+    """target_course(라우터가 질의에서 인식한 특정 코스명)로 해당 코스의 crops/
+    administrative_areas 메타데이터를 조회합니다. quick_responder_node가 코스명이 언급된
+    질의에서 그 코스의 작물/지역을 검색 조건으로 자동 보완하는 데 사용합니다. 조회 실패 시
+    None을 반환해 상위 로직이 그대로 key_item_or_crop/preferred_location 없이 진행하도록
+    합니다(다른 DB 조회 헬퍼들과 동일한 fail-soft 방식).
+    """
+    try:
+        res = (
+            client.table("courses")
+            .select("course_name, crops, administrative_areas")
+            .eq("course_name", course_name)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"[!] 코스 메타데이터(target_course={course_name}) 조회 실패, 생략합니다: {e}")
+        return None
+
+
 def _search_culture_knowledge(
     client: Any, key_item_or_crop: str | None, fallback_query: str
 ) -> List[Dict[str, Any]]:
@@ -666,24 +691,33 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
                 "filter_course_ids": course_ids
             }).execute()
             
-            # 검색된 청크의 코스 세부 정보 및 메타데이터 결합
+            # 검색된 청크의 코스 세부 정보 및 메타데이터 결합. 청크 하나마다 개별 try/except 로
+            # 격리합니다 — 예전엔 이 for 루프 전체가 바깥 try 안에 있어서, DB의 결측치 하나
+            # (예: total_distance_km IS NULL 인 행)가 예외를 일으키면 그 시점까지 처리된 청크만
+            # 남고 이후의 멀쩡한 청크들까지 통째로 버려지는 문제가 있었습니다.
             for item in rpc_res.data:
-                c_res = client.table("courses").select("*").eq("id", item["course_id"]).execute()
-                course_meta = c_res.data[0] if c_res.data else {}
-                
-                chunks_data.append({
-                    "chunk_id": item["id"],
-                    "course_id": item["course_id"],
-                    "course_name": course_meta.get("course_name"),
-                    "crops": course_meta.get("crops", ""),
-                    "administrative_areas": course_meta.get("administrative_areas", ""),
-                    "total_distance_km": float(course_meta.get("total_distance_km", 0.0)),
-                    "estimated_time_text": course_meta.get("estimated_time_text", ""),
-                    "difficulty": course_meta.get("difficulty", "중"),
-                    "title": item["title"],
-                    "content": item["content"],
-                    "similarity": item["similarity"]
-                })
+                try:
+                    c_res = client.table("courses").select("*").eq("id", item["course_id"]).execute()
+                    course_meta = c_res.data[0] if c_res.data else {}
+
+                    chunks_data.append({
+                        "chunk_id": item["id"],
+                        "course_id": item["course_id"],
+                        "course_name": course_meta.get("course_name"),
+                        "crops": course_meta.get("crops", ""),
+                        "administrative_areas": course_meta.get("administrative_areas", ""),
+                        # .get(key, 0.0) 은 키가 아예 없을 때만 기본값을 쓰고, 키는 있는데 값이
+                        # NULL(None)인 경우는 그대로 None 을 반환해 float(None) 에서 TypeError 가
+                        # 났었습니다 — "or 0.0" 으로 None/누락 둘 다 안전하게 처리합니다.
+                        "total_distance_km": float(course_meta.get("total_distance_km") or 0.0),
+                        "estimated_time_text": course_meta.get("estimated_time_text", ""),
+                        "difficulty": course_meta.get("difficulty", "중"),
+                        "title": item["title"],
+                        "content": item["content"],
+                        "similarity": item["similarity"]
+                    })
+                except Exception as e:
+                    print(f"[!] 코스 청크(course_id={item.get('course_id')}) 조립 실패, 이 청크만 건너뜁니다: {e}")
         except Exception as e:
             print(f"[!] RAG 벡터 검색 중 예외 발생: {e}")
 
@@ -908,6 +942,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     query = state["query"]
     constraints = state.get("parsed_constraints") or {}
     b2b_params = state.get("b2b_params") or {}
+    target_course = state.get("target_course")
     key_item_or_crop = b2b_params.get("key_item_or_crop")
     preferred_location = b2b_params.get("preferred_location")
     target_month = b2b_params.get("target_month") or date.today().month
@@ -916,6 +951,18 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     fallback_query = constraints.get("vector_query") or query
 
     client = get_supabase_client()
+
+    # "OO코스 알려줘" 처럼 특정 코스명이 언급된 질의는, 파서가 key_item_or_crop/
+    # preferred_location 을 못 채웠어도 그 코스의 실제 작물/지역으로 검색 조건을 보완합니다
+    # (이전엔 target_course 가 아예 무시되어 코스명을 특정해도 일반 검색과 동일하게 동작했음).
+    course_meta = _fetch_course_meta_by_name(client, target_course) if target_course else None
+    if course_meta:
+        if not key_item_or_crop:
+            key_item_or_crop = (course_meta.get("crops") or "").split(",")[0].strip() or None
+        if not preferred_location:
+            preferred_location = (
+                (course_meta.get("administrative_areas") or "").split(",")[0].strip() or None
+            )
 
     culture_chunks = _search_culture_knowledge(client, key_item_or_crop, fallback_query)
 
@@ -939,6 +986,8 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             f"{location_resolution.get('year_month')} 기준 {metric_label} 1위 지역으로 자동 선정되었습니다."
         )
 
+    course_note = f"\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다." if target_course else ""
+
     if culture_chunks or market_insight:
         system_prompt = """당신은 제주올레 B2B 기획서 도슨트의 사전 정보 조회 도우미입니다.
 기획서를 작성하는 게 아니라, 기획자가 궁금해하는 제주 문화·작물 지식이나 관광 방문객 통계를
@@ -953,7 +1002,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         user_msg = (
             f"[질문]: {query}\n\n"
             f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
-            f"[관광 방문객 통계]:\n{market_context_str}{location_note}"
+            f"[관광 방문객 통계]:\n{market_context_str}{location_note}{course_note}"
         )
         answer = get_chat_completion(system_prompt, user_msg)
     else:
@@ -1318,17 +1367,44 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     introduction_snippets = []
     rec_cache: Dict[Any, Any] = {}
 
-    # 검색된 상위 코스들의 작물 및 행정구역 조합에 대해 비짓제주 소개 정보를 참고 재료로 수집
+    # 검색된 상위 코스들의 작물 및 행정구역 조합에 대해 비짓제주 소개 정보를 참고 재료로 수집합니다.
+    # 조합 개수만큼 API 호출이 하나씩 순서대로 쌓이면 지연이 누적되므로(조합이 여러 개인 리포트일수록
+    # 체감 지연이 커짐), 먼저 중복 없는 조합만 추려 스레드풀로 동시에 조회한 뒤(get_visit_jeju_recommendations
+    # 는 내부적으로 실패 시 예외를 던지지 않고 Mock 데이터로 폴백하므로 여기서의 except 는 순수 방어용),
+    # 그 결과를 원래 코스 순서대로 다시 조립합니다 — 조립 단계는 API 호출이 없는 순수 로컬 연산이라
+    # 병렬화할 필요가 없습니다.
+    unique_combos = []
+    seen_combos = set()
+    for chunk in chunks:
+        crops = [c.strip() for c in chunk["crops"].split(",") if c.strip()]
+        areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
+        for crop in crops:
+            for area in areas:
+                combo = (crop, area)
+                if combo not in seen_combos:
+                    seen_combos.add(combo)
+                    unique_combos.append(combo)
+
+    if unique_combos:
+        with ThreadPoolExecutor(max_workers=min(8, len(unique_combos))) as executor:
+            future_to_combo = {
+                executor.submit(get_visit_jeju_recommendations, crop, area): (crop, area)
+                for crop, area in unique_combos
+            }
+            for future, combo in future_to_combo.items():
+                try:
+                    rec_cache[combo] = future.result()
+                except Exception as e:
+                    print(f"[!] 비짓제주 API 조회 실패(작물={combo[0]}, 지역={combo[1]}), 이 조합은 건너뜁니다: {e}")
+                    rec_cache[combo] = []
+
     for chunk in chunks:
         crops = [c.strip() for c in chunk["crops"].split(",") if c.strip()]
         areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
 
         for crop in crops:
             for area in areas:
-                cache_key = (crop, area)
-                if cache_key not in rec_cache:
-                    rec_cache[cache_key] = get_visit_jeju_recommendations(crop, area)
-                rec_list = rec_cache[cache_key]
+                rec_list = rec_cache.get((crop, area), [])
                 for rec in rec_list:
                     recommendations.append(rec)
                     intro = (rec.get("introduction") or "").strip()
@@ -1481,19 +1557,30 @@ def check_quality_node(state: AgentState) -> Dict[str, Any]:
         return {"quality_report": {"passed": True, "score": 1.0, "feedback": "검색 결과가 없어 평가를 생략합니다."}}
 
     if chunks:
-        context_str = ""
+        b2b_params = state.get("b2b_params") or {}
+        requested_bits = []
+        if b2b_params.get("key_item_or_crop"):
+            requested_bits.append(f"작물/테마: {b2b_params['key_item_or_crop']}")
+        if b2b_params.get("preferred_location"):
+            requested_bits.append(f"선호 지역: {b2b_params['preferred_location']}")
+        if b2b_params.get("target_month"):
+            requested_bits.append(f"방문 월: {b2b_params['target_month']}월")
+        requested_summary = ", ".join(requested_bits) if requested_bits else "(특정 작물/지역/월 조건 없음)"
+
+        context_str = f"[사용자가 요청한 핵심 조건]: {requested_summary}\n"
         for i, c in enumerate(chunks):
             context_str += f"\n[코스 {i+1}]: {c['course_name']} (거리: {c['total_distance_km']}km, 소요시간: {c['estimated_time_text']}, 난이도: {c['difficulty']})\n"
             context_str += f"재배작물: {c['crops']}, 경유 행정구역: {c['administrative_areas']}\n"
             context_str += f"본문: {c['content']}\n"
 
-        system_prompt = """당신은 생성된 도슨트 추천 답변의 핵심 사실 관계만을 검증하는 '품질 검증원'입니다.
+        system_prompt = """당신은 생성된 도슨트 추천 답변의 핵심 사실 관계 및 요청 관련성을 검증하는 '품질 검증원'입니다.
 주어진 [사용자 질문], [검색 컨텍스트] 및 [생성된 답변] 을 분석하여 답변의 환각 여부 및 정보 충실도를 채점하세요.
 JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 반환하세요.
 
 [검증 대상 - 아래 사실 항목에서만 컨텍스트와의 모순 여부를 확인하세요]
 1. 코스명, 거리, 소요시간, 난이도, 재배작물, 경유 행정구역 등 컨텍스트에 명시된 구체적 수치/명칭을 답변이 왜곡하거나 컨텍스트와 반대로 서술했는가?
 2. 사용자가 요청한 필수 제약사항(예: 휠체어 전용 코스 여부)을 어기고 부적절한 코스를 추천했는가?
+3. [사용자가 요청한 핵심 조건]에 작물/지역/월이 명시되어 있다면, 답변이 추천한 코스가 그 조건과 실제로 관련이 있는가? 사실관계 자체는 컨텍스트와 일치하더라도, 컨텍스트의 코스들이 요청한 조건과 무관한데 답변이 마치 조건에 맞는 것처럼 추천했다면 이것도 결점으로 판정하세요. (조건이 "(특정 작물/지역/월 조건 없음)"이면 이 항목은 항상 통과로 간주)
 
 [검증 대상에서 제외 - 아래 항목은 도슨트의 정상적인 연출이므로 절대 환각이나 결점으로 지적하지 마세요]
 - 날씨 정보, 옷차림/준비물 팁, 여행 조언 등 컨텍스트 밖의 실용적 부가 안내
