@@ -75,7 +75,7 @@ def get_solar_embedding(text: str) -> list[float]:
 
 def load_courses_to_db(client: Client, courses: list[dict]) -> bool:
     """코스 메타데이터, 세부 구간 메타데이터 및 청크 임베딩 데이터를 Supabase DB에 적재합니다.
-    로컬 추천 상점은 이제 recommend_local_node 가 런타임에 비짓제주 API를 직접 호출하므로
+    로컬 추천 상점은 이제 generate_report_node 가 런타임에 비짓제주 API를 직접 호출하므로
     여기서는 별도로 적재하지 않습니다.
     """
     for course in courses:

@@ -135,7 +135,7 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
         "parsed_constraints": None,
         # intent_category 를 미리 고정하지 않고 intent_classifier 의 실제 LLM 분류에 맡깁니다.
         # (예전에는 "자연어 질의는 항상 기획서 파이프라인을 완주해야 한다"는 이유로 여기서
-        # course_recommendation 으로 하드코딩했었는데, 그러면 route_intent_node 가 이미 세팅된
+        # course_recommendation 으로 하드코딩했었는데, 그러면 classify_intent_node 가 이미 세팅된
         # intent_category 를 보고 LLM 분류 자체를 건너뛰어서 info_lookup 같은 실제 분기가 전혀
         # 발동할 수 없었습니다 — 프로덕션에서 발견됨. target_course 도 미리 세팅하지 않음(자연어라
         # 특정 코스가 선지정되지 않고 검색이 찾아냄).
