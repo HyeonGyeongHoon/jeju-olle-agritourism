@@ -640,12 +640,29 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     if b2b_params.get("include_market_insights", True):
         market_insight = _fetch_market_insight(client, preferred_location, target_month)
 
-    # RDB 기반 필터링 (완화 없이 1회만 단독 실행)
-    course_ids = _execute_rdb_filtering(client, hard, target_course)
+    # RDB 기반 필터링 (완화 없이 1회만 단독 실행, 휠체어 등 hard_constraints 만 반영)
+    course_ids = _execute_rdb_filtering(client, hard)
 
     # B2B 성격상 B2C형 소프트 제약 및 Fallback 완화 로직은 제거됨 (기본값 설정)
     fallback_applied = False
     fallback_reason = None
+
+    # target_course(질의에 특정 코스가 언급된 경우)도 지역/작물과 동일한 방식으로 처리합니다.
+    # 예전엔 이걸 _execute_rdb_filtering 안에서 courses.course_name 완전 일치(.eq())로 하드
+    # 필터링했는데, target_course 가 "1코스" 같은 정식 코스명이 아니라 "가파도"처럼 섬/지명으로
+    # 들어오면(라우터가 그렇게 추출할 수 있음) course_name 과 절대 일치하지 않아 후보가 0개가
+    # 되고, 그 뒤 벡터 검색조차 시도되지 않은 채 곧바로 "코스를 찾을 수 없다"는 완전 폴백으로
+    # 빠지는 문제가 있었습니다(2026-07-24 QA 시나리오 테스트에서 실제 재현: "가파도 코스로
+    # 기획서 만들어줘"). 겹치는 코스가 하나도 없으면 이 조건을 해제하고 전체에서 계속 진행하되
+    # 그 사실을 fallback_reason 으로 남깁니다.
+    if target_course and course_ids:
+        course_ids, target_course_matched = _filter_course_ids_by_target_course(client, course_ids, target_course)
+        if not target_course_matched:
+            fallback_applied = True
+            fallback_reason = (
+                f"'{target_course}' 코스명과 직접 일치하는 코스를 찾지 못해, "
+                f"해당 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
+            )
 
     # 지역 조건(preferred_location)을 벡터 검색 이전에 실제 하드 필터로 반영합니다. 이게 없으면
     # 벡터 검색이 먼저 의미상 가장 비슷한 상위 몇 개만 뽑고 그 안에서만 지역 boost를 적용해,
@@ -772,24 +789,54 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def _execute_rdb_filtering(client: Any, hard: dict, target_course: str | None = None) -> List[int]:
-    """courses 테이블을 메타데이터 기반으로 SQL 필터링하여 일치하는 코스 ID 리스트를 반환합니다."""
+def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
+    """courses 테이블을 메타데이터(hard_constraints) 기반으로 SQL 필터링하여 일치하는 코스 ID
+    리스트를 반환합니다. target_course 는 여기서 하드 필터링하지 않습니다 — course_name 과
+    완전 일치하지 않으면(예: 섬 이름 "가파도"가 실제 코스명 "10-1코스"와 문자열이 다른 경우)
+    후보가 0개가 되어 그 뒤 검색 전체가 죽는 문제가 있었습니다. target_course 는
+    _filter_course_ids_by_target_course 로 지역/작물 조건과 동일하게 fail-soft 처리합니다.
+    """
     query = client.table("courses").select("id")
 
-    # 0. 특정 코스가 명시적으로 지정된 경우(B2B 구조화 입력 등) 정확히 일치하는 코스만 반환.
-    if target_course:
-        query = query.eq("course_name", target_course)
-
-    # 1. Hard Constraints 필터링 (절대 보장)
     if hard.get("wheelchair_required"):
         query = query.eq("has_wheelchair_segment", "있음")
-        
+
     try:
         res = query.execute()
         return [row["id"] for row in res.data] if res.data else []
     except Exception as e:
         print(f"[!] RDB 필터링 실행 실패: {e}")
         return []
+
+
+def _filter_course_ids_by_target_course(
+    client: Any, course_ids: List[int], target_course: str
+) -> tuple[List[int], bool]:
+    """course_ids 중 target_course(질의에 특정 코스가 언급된 경우 라우터가 추출한 값 — "1코스"
+    같은 정식 코스명뿐 아니라 "가파도"처럼 섬/지명이 섞여 들어올 수도 있음)와 실제로 겹치는
+    코스만 남깁니다. _filter_course_ids_by_location 과 동일하게 course_name/administrative_areas
+    부분 일치로 판정하고, 하나도 안 겹치면(완전 배제 대신) 원래 course_ids 를 그대로 반환하고
+    두 번째 반환값을 False 로 표시합니다 — 이후 pgvector 유사도 검색은 코스 본문(가이드북 원문)에
+    실제로 언급된 지명까지 의미 기반으로 잡아낼 수 있어, 이 필터가 못 걸러도 최종 결과가 완전히
+    빗나가지 않는 경우가 많습니다.
+    """
+    if not target_course or not course_ids:
+        return course_ids, False
+
+    try:
+        res = client.table("courses").select("id,administrative_areas,course_name").in_("id", course_ids).execute()
+    except Exception as e:
+        print(f"[!] 대상 코스 필터링용 코스 조회 실패, 조건 없이 진행합니다: {e}")
+        return course_ids, False
+
+    matched_ids = [
+        row["id"]
+        for row in (res.data or [])
+        if target_course in (row.get("course_name") or "") or target_course in (row.get("administrative_areas") or "")
+    ]
+    if matched_ids:
+        return matched_ids, True
+    return course_ids, False
 
 
 def _filter_course_ids_by_location(

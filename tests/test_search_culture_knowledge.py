@@ -121,3 +121,19 @@ def test_falls_back_to_local_docs_when_all_rpc_results_are_wrong_crop():
 
     assert result == local_fallback_result
     mock_local.assert_called_once_with("당근", "당근", allow_general_fallback=False)
+
+
+def test_falls_back_to_local_docs_when_rpc_call_itself_raises(monkeypatch):
+    """QA 시나리오 F1: culture_crop_knowledge RPC 조회 자체가 실패해도(DB 연결 문제 등),
+    예외를 삼키고 로컬 JSON 문서 검색으로 폴백해야 합니다 — 크롭 불일치로 결과가 빈 경우와는
+    다른 코드 경로(바깥 try/except)라 별도로 검증합니다."""
+    client = MagicMock()
+    client.rpc.side_effect = Exception("connection refused")
+    local_fallback_result = [{"title": "당근 재배(로컬)", "crop_name": "당근"}]
+
+    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(nodes, "_search_local_culture_docs", return_value=local_fallback_result) as mock_local:
+        result = _search_culture_knowledge(client, "당근", "당근")
+
+    assert result == local_fallback_result
+    mock_local.assert_called_once()
