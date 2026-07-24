@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Dict, Any, List
 from src.agent.llm_client import get_chat_completion
-from src.agent.weather_client import simulate_weather_by_query, get_seasonal_climate_note
+from src.agent.weather_client import assess_weather_risk_from_query, get_seasonal_climate_note
 from src.agent.router import route_intent
 from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
@@ -319,9 +319,10 @@ def resolve_market_location_node(state: AgentState) -> Dict[str, Any]:
 
 
 def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
-    """방문 시기(월)의 정적 계절 기후 특성과 질의 텍스트 기반 위험 키워드 시뮬레이션을 결합해
-    기후 및 동선 리스크를 진단하는 Safety Evaluator 노드입니다. 실시간 외부 기상 API 를 호출하지
-    않고, 문서화된 계절 지식(get_seasonal_climate_note)만 사용합니다.
+    """방문 시기(월)의 정적 계절 기후 특성과, 질의 텍스트에 실제로 담긴 기상 위험 여부에 대한
+    LLM 판단을 결합해 기후 및 동선 리스크를 진단하는 Safety Evaluator 노드입니다. 실시간 외부
+    기상 API(KMA 등)는 호출하지 않고, 문서화된 계절 지식(get_seasonal_climate_note)과 Solar
+    LLM(assess_weather_risk_from_query) 만 사용합니다.
     """
     query = state["query"]
     b2b_params = state.get("b2b_params") or {}
@@ -330,16 +331,16 @@ def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
     # 1. 방문 월 기반 정적 계절 기후 특성 조회 (외부 API 호출 없음)
     seasonal_weather = get_seasonal_climate_note(target_month)
 
-    # 2. 질문 텍스트 기반 시뮬레이션 날씨 진단 (태풍 등 위험 시나리오 데모/검증용, 100% 로컬)
-    simulated_weather = simulate_weather_by_query(query)
+    # 2. 질문 텍스트가 실제로 지금/이번 방문에 대한 기상 위험을 의미하는지 LLM으로 판단
+    #    (예전엔 "태풍"/"폭우"/"홍수" 단어가 있기만 하면 문맥과 무관하게 DANGER로 오판했음 —
+    #    2026-07-24 QA 리뷰 지적 후 LLM 문맥 판단으로 교체)
+    assessed_weather = assess_weather_risk_from_query(query)
 
-    # 3. 계절 기후와 시뮬레이션 결합
-    # 시뮬레이션의 DANGER(태풍/폭우/홍수)만 실제 판단에 반영합니다.
-    # WARNING 등급("바람", "비" 등 일상 대화에서도 흔히 쓰이는 단어 기반)까지 반영하면
-    # 실제 위험이 없어도 오탐으로 안전 우회가 발동할 수 있어 실제 판단에서는 제외합니다.
+    # 3. 계절 기후와 LLM 판단 결합. DANGER(질문이 실제로 지금 위험을 묻는 경우)만 계절 기후
+    # 판단을 덮어쓰고, 그 외(SAFE)는 계절 기후 판단을 그대로 유지합니다.
     weather = seasonal_weather
-    if simulated_weather["status"] == "DANGER":
-        weather = simulated_weather
+    if assessed_weather["status"] == "DANGER":
+        weather = assessed_weather
 
     safety_check = {
         "safety_status": weather["status"],

@@ -1,4 +1,7 @@
+import json
 from typing import Dict, Any
+
+from src.agent.llm_client import get_chat_completion
 
 # 월별 제주도 계절 기후 특성 정적 참고 테이블입니다. 실시간 외부 기상 API 호출 없이,
 # 문서화된 계절 지식만으로 기후 및 동선 리스크를 판단하기 위해 사용합니다.
@@ -60,27 +63,58 @@ def get_seasonal_climate_note(month: int) -> Dict[str, Any]:
     }
 
 
-def simulate_weather_by_query(query: str) -> Dict[str, Any]:
-    """사용자 질문 텍스트에 기상 위험 키워드가 있을 경우,
-    Safety Evaluator 노드가 올바르게 대처하는지 테스트하기 위한 날씨 시뮬레이션 유틸리티입니다.
+_WEATHER_RISK_SYSTEM_PROMPT = """당신은 제주올레 탐방객의 질문에서 실제 기상 위험 여부를 판단하는 안전 분석기입니다.
+질문에 "태풍", "폭우", "홍수", "강풍", "비" 같은 날씨 단어가 들어 있어도, 그것이 항상 지금/이번
+방문 시점에 대한 실제 위험 경보를 의미하지는 않습니다. 아래 기준으로만 판단하세요.
+
+[DANGER 로 판단하는 경우]
+- 질문 자체가 지금 또는 곧 있을 방문 시점에 태풍/폭우/홍수 등 심각한 기상 위험이 실제로 있다고
+  전제하거나, 그 위험 속에서 탐방이 가능한지를 묻는 경우
+  (예: "태풍 오는데 지금 걸어도 될까요?", "이번 주 폭우 예보인데 코스 괜찮을까요?")
+
+[SAFE 로 판단하는 경우 - 날씨 단어가 있어도 지금 실제 위험 상황을 묻는 게 아님]
+- 과거 사례를 언급하는 경우 (예: "작년 태풍 피해가 컸다던데")
+- 위험 상황에 대한 일반적인 대비책/에티켓을 묻는 경우 (예: "태풍 오면 어떻게 대처해야 하나요?")
+- 날씨와 무관한 맥락에서 단어만 스친 경우
+
+JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 반환하세요.
+{
+  "status": "DANGER" 또는 "SAFE",
+  "reason": "판단 근거 한 문장"
+}"""
+
+
+def assess_weather_risk_from_query(query: str) -> Dict[str, Any]:
+    """사용자 질문 텍스트에서 실제로 지금/이번 방문에 영향을 주는 기상 위험이 있는지를 LLM으로
+    판단합니다(Solar API 재사용, 새 외부 연동 없음).
+    예전엔 "태풍"/"폭우"/"홍수" 같은 단어가 문맥과 무관하게(과거 언급, 대비책 질문 등) 들어있기만
+    해도 무조건 DANGER 로 오판했습니다(2026-07-24 QA 리뷰 지적 — "작년 태풍 피해가 컸나요?" 같은
+    질문도 지금 태풍이 온 것처럼 오탐지). 이제는 그 단어가 실제로 "이번 방문 시점의 위험 경보"를
+    의미하는지, 아니면 과거 사례·가정·대비책 질문처럼 실제 위험이 아닌지를 LLM이 구분합니다.
+    LLM 호출 실패 시 SAFE 로 폴백합니다 — 이 함수의 목적 자체가 오탐지로 인한 불필요한 안전
+    우회를 없애는 것이므로, 장애 시 DANGER 로 폴백하면 같은 문제가 형태만 바뀌어 재발합니다.
     """
-    if "태풍" in query or "폭우" in query or "홍수" in query:
+    try:
+        raw = get_chat_completion(_WEATHER_RISK_SYSTEM_PROMPT, f"[탐방객 질문]: {query}")
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+        parsed = json.loads(cleaned.strip())
+        status = parsed.get("status") if parsed.get("status") in ("DANGER", "SAFE") else "SAFE"
+    except Exception as e:
+        print(f"[!] 날씨 위험 LLM 판단 실패, 안전하게 SAFE 로 폴백합니다: {e}")
+        status = "SAFE"
+
+    if status == "DANGER":
         return {
             "status": "DANGER",
             "temperature": 18.0,
             "precipitation_mm": 80.0,
             "wind_speed_ms": 22.0,
-            "warnings": ["제주도 태풍경보 발효 중"],
-            "description": "태풍으로 인해 야외 활동이 매우 위험합니다."
-        }
-    elif "비" in query or "강풍" in query or "바람" in query:
-        return {
-            "status": "WARNING",
-            "temperature": 19.5,
-            "precipitation_mm": 15.0,
-            "wind_speed_ms": 12.5,
-            "warnings": ["제주도 강풍주의보 발효 중"],
-            "description": "강풍 및 강우로 인해 해안가 코스는 위험할 수 있습니다."
+            "warnings": ["제주도 태풍/폭우 등 기상 위험 경보 발효 중"],
+            "description": "기상 악화로 인해 야외 활동이 매우 위험합니다."
         }
     return {
         "status": "SAFE",

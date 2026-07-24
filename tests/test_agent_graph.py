@@ -1,7 +1,7 @@
 import pytest
 from src.agent.graph import agent_runtime
 from src.agent.state import AgentState
-from src.agent.weather_client import simulate_weather_by_query
+from src.agent.weather_client import assess_weather_risk_from_query
 
 
 def test_intent_parsing_and_graph_execution():
@@ -42,10 +42,10 @@ def test_safety_evaluator_weather_fallback():
     (route_after_location_resolve — 그 외 4개 의도는 quick_responder 로 우회), intent_category 를
     course_recommendation 으로 명시해 LLM 분류 결과에 좌우되지 않고 결정적으로 그 경로를 태웁니다."""
     query = "태풍 불 때 올레길 1코스 걷는 것 괜찮을까?"
-    weather = simulate_weather_by_query(query)
+    weather = assess_weather_risk_from_query(query)
 
     assert weather["status"] == "DANGER"
-    assert "태풍경보" in weather["warnings"][0]
+    assert weather["warnings"]
 
     inputs = {
         "query": query,

@@ -1,7 +1,10 @@
+import json
 import os
+from unittest.mock import patch
 
 from dotenv import load_dotenv
-from src.agent.weather_client import get_seasonal_climate_note, simulate_weather_by_query
+from src.agent import weather_client
+from src.agent.weather_client import assess_weather_risk_from_query, get_seasonal_climate_note
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
 
 load_dotenv()
@@ -46,22 +49,45 @@ def test_get_seasonal_climate_note_unknown_month_falls_back_safe():
     assert len(note["warnings"]) == 0
 
 
-def test_weather_client_simulation():
-    """질문 키워드에 따른 날씨 위험도(DANGER/WARNING) 시뮬레이션 검증합니다."""
-    # 1. 태풍 키워드 테스트 (DANGER)
-    danger_weather = simulate_weather_by_query("태풍 오는데 갈 수 있나요?")
-    assert danger_weather["status"] == "DANGER"
-    assert "태풍경보" in danger_weather["warnings"][0]
+def _mock_llm_status(status: str, reason: str = "테스트 판단"):
+    return json.dumps({"status": status, "reason": reason})
 
-    # 2. 비/강풍 키워드 테스트 (WARNING)
-    warning_weather = simulate_weather_by_query("비바람이 많이 칩니다.")
-    assert warning_weather["status"] == "WARNING"
-    assert "강풍주의보" in warning_weather["warnings"][0]
 
-    # 3. 안전한 맑은 키워드 테스트 (SAFE)
-    safe_weather = simulate_weather_by_query("날씨가 맑은데 추천해줘")
-    assert safe_weather["status"] == "SAFE"
-    assert len(safe_weather["warnings"]) == 0
+def test_weather_risk_assessment_danger_when_query_asks_about_current_risk():
+    """지금/이번 방문 시점의 실제 위험을 묻는 질문은 DANGER로 판단해야 합니다."""
+    with patch.object(weather_client, "get_chat_completion", return_value=_mock_llm_status("DANGER")):
+        weather = assess_weather_risk_from_query("태풍 오는데 지금 걸어도 될까요?")
+
+    assert weather["status"] == "DANGER"
+    assert weather["warnings"]
+
+
+def test_weather_risk_assessment_safe_for_past_tense_mention():
+    """회귀 방지: "작년 태풍 피해가 컸다던데" 처럼 날씨 위험 단어가 있어도 과거를 언급하는
+    질문은, 예전 키워드 매칭 방식과 달리 DANGER로 오판하면 안 됩니다(2026-07-24 QA 리뷰 지적)."""
+    with patch.object(weather_client, "get_chat_completion", return_value=_mock_llm_status("SAFE")):
+        weather = assess_weather_risk_from_query("작년 태풍 피해가 컸다던데, 그때도 이 코스 걸을 수 있었나요?")
+
+    assert weather["status"] == "SAFE"
+    assert weather["warnings"] == []
+
+
+def test_weather_risk_assessment_safe_for_clear_weather_query():
+    with patch.object(weather_client, "get_chat_completion", return_value=_mock_llm_status("SAFE")):
+        weather = assess_weather_risk_from_query("날씨가 맑은데 추천해줘")
+
+    assert weather["status"] == "SAFE"
+    assert len(weather["warnings"]) == 0
+
+
+def test_weather_risk_assessment_falls_back_to_safe_on_llm_failure():
+    """LLM 호출 자체가 실패해도(네트워크 오류, malformed JSON 등) DANGER로 폴백하면 안 됩니다 —
+    이 함수의 목적 자체가 오탐지로 인한 불필요한 안전 우회를 없애는 것이므로, 장애 시 DANGER로
+    폴백하면 같은 문제가 형태만 바뀌어 재발합니다."""
+    with patch.object(weather_client, "get_chat_completion", side_effect=Exception("네트워크 오류")):
+        weather = assess_weather_risk_from_query("태풍 오는데 갈 수 있나요?")
+
+    assert weather["status"] == "SAFE"
 
 
 def test_visit_jeju_client_mock_data():
