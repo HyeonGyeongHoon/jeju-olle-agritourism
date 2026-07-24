@@ -25,6 +25,7 @@ class IntentCategory(str, Enum):
     COURSE_RECOMMENDATION = "course_recommendation"
     OLLE_GENERAL_INFO = "olle_general_info"
     OTHER = "other"
+    INFO_LOOKUP = "info_lookup"
 
 
 class RouterResult(BaseModel):

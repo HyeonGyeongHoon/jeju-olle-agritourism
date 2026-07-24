@@ -60,6 +60,21 @@ def test_route_intent_other(monkeypatch):
     assert result.category == IntentCategory.OTHER
 
 
+def test_route_intent_info_lookup(monkeypatch):
+    fake_response = """{
+        "category": "info_lookup",
+        "target_course": null,
+        "reason": "제주 밭담문화 정보 자체를 묻는 질문"
+    }"""
+    monkeypatch.setattr(
+        router, "get_chat_completion", lambda sys_prompt, query: fake_response
+    )
+
+    result = router.route_intent("제주 밭담문화가 뭐야?")
+    assert result.category == IntentCategory.INFO_LOOKUP
+    assert result.target_course is None
+
+
 def test_route_intent_strips_markdown_code_fence(monkeypatch):
     fenced_response = """```json
     {

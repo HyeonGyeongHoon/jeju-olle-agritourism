@@ -37,17 +37,21 @@ def test_intent_parsing_and_graph_execution():
 
 
 def test_safety_evaluator_weather_fallback():
-    """태풍 등 강풍 경보 발생 시 Safety Evaluator 가 작동하여 안전 우회 경로 보정 쿼리를 수립하는지 검증합니다."""
+    """태풍 등 강풍 경보 발생 시 Safety Evaluator 가 작동하여 안전 우회 경로 보정 쿼리를 수립하는지 검증합니다.
+    safety_evaluator 는 이제 course_recommendation 의도일 때만 실행되는 full pipeline 에만 있으므로
+    (route_after_location_resolve — 그 외 4개 의도는 quick_responder 로 우회), intent_category 를
+    course_recommendation 으로 명시해 LLM 분류 결과에 좌우되지 않고 결정적으로 그 경로를 태웁니다."""
     query = "태풍 불 때 올레길 1코스 걷는 것 괜찮을까?"
     weather = simulate_weather_by_query(query)
-    
+
     assert weather["status"] == "DANGER"
     assert "태풍경보" in weather["warnings"][0]
-    
+
     inputs = {
         "query": query,
         "loop_count": 0,
         "parsed_constraints": None,
+        "intent_category": "course_recommendation",
         "weather_info": None,
         "safety_check": None,
         "retrieved_chunks": [],
@@ -58,7 +62,7 @@ def test_safety_evaluator_weather_fallback():
         "final_response": None,
         "quality_report": None
     }
-    
+
     result = agent_runtime.invoke(inputs)
     
     # Safety Evaluator 가 켜졌는지 검증

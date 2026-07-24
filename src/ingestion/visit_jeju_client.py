@@ -32,10 +32,13 @@ def get_visit_jeju_recommendations(crop_tag: str, administrative_area: str) -> L
     
     # 비짓제주 API 는 상세 검색 키워드를 제공하지 않는 경우가 많으므로 전체 조회를 돌며 필터링하거나,
     # API 호출을 보완합니다. 여기서는 API 를 직접 호출하되 에러 발생 시 Mock 으로 안전하게 처리합니다.
-    max_retries = 3
+    # timeout/재시도 횟수는 일부러 짧게 잡았습니다 — 방화벽 차단이나 API 서버 응답 지연으로 매번
+    # 실패하는 상황(2026-07-24 확인)에서 기존 timeout=10초 x 3회 재시도(최대 약 36초/호출)로는
+    # 크롭×지역 조합이 여러 개인 리포트 하나 생성에 지연이 크게 누적됐습니다.
+    max_retries = 2
     for attempt in range(max_retries):
         try:
-            response = requests.get(VISIT_JEJU_SEARCH_URL, params=params, timeout=10)
+            response = requests.get(VISIT_JEJU_SEARCH_URL, params=params, timeout=4)
             if response.status_code == 200:
                 data = response.json()
                 items = data.get("items", [])
@@ -66,6 +69,7 @@ def get_visit_jeju_recommendations(crop_tag: str, administrative_area: str) -> L
                             "latitude": float(item.get("latitude", 0.0)) if item.get("latitude") else 0.0,
                             "longitude": float(item.get("longitude", 0.0)) if item.get("longitude") else 0.0,
                             "administrative_area": administrative_area,
+                            "source": "visitjeju_api",
                             "metadata": {
                                 "reccenter": item.get("reccenter", ""),
                                 "imgpath": item.get("imgpath", "")
@@ -78,7 +82,7 @@ def get_visit_jeju_recommendations(crop_tag: str, administrative_area: str) -> L
                 return filtered_recommendations
                 
             elif response.status_code == 429:
-                time.sleep((attempt + 1) * 2)
+                time.sleep((attempt + 1) * 1)
             else:
                 response.raise_for_status()
         except Exception as e:
@@ -86,7 +90,7 @@ def get_visit_jeju_recommendations(crop_tag: str, administrative_area: str) -> L
             if attempt == max_retries - 1:
                 print("[!] API 호출 실패로 인해 로컬 Mock 데이터로 폴백합니다.")
                 return _get_mock_recommendations(crop_tag, administrative_area)
-            time.sleep((attempt + 1) * 2)
+            time.sleep((attempt + 1) * 1)
             
     return _get_mock_recommendations(crop_tag, administrative_area)
 
@@ -231,6 +235,150 @@ def _get_mock_recommendations(crop_tag: str, administrative_area: str) -> List[D
             "latitude": 33.168450,
             "longitude": 126.271890,
             "administrative_area": "가파리"
+        },
+        # 무(월동무) - 성산읍/구좌읍
+        {
+            "crop_tag": "무",
+            "title": "시흥리 월동무 해장국",
+            "address": "서귀포시 성산읍 시흥리 203-1",
+            "road_address": "서귀포시 성산읍 오조로 88",
+            "phone": "064-784-2031",
+            "introduction": "제주 화산토에서 자란 아삭한 월동무로 끓인 시원한 무해장국과 무말랭이 반찬이 일품인 마을 식당입니다.",
+            "latitude": 33.462350,
+            "longitude": 126.902100,
+            "administrative_area": "시흥리"
+        },
+        # 유채 - 표선면 가시리
+        {
+            "crop_tag": "유채",
+            "title": "가시리 노란꽃밭 카페",
+            "address": "서귀포시 표선면 가시리 1717-5",
+            "road_address": "서귀포시 표선면 녹산로 464",
+            "phone": "064-787-1717",
+            "introduction": "녹산로 유채꽃밭 초입에 자리한 카페로, 봄철엔 유채꽃 라떼와 유채나물 파스타를 선보입니다.",
+            "latitude": 33.395280,
+            "longitude": 126.799460,
+            "administrative_area": "가시리"
+        },
+        # 감자 - 구좌읍 종달리 (대정 가을감자를 취급하는 동부 지역 매장으로 설정)
+        {
+            "crop_tag": "감자",
+            "title": "종달리 감자옹심이",
+            "address": "제주시 구좌읍 종달리 331-2",
+            "road_address": "제주시 구좌읍 종달로 45",
+            "phone": "064-783-3312",
+            "introduction": "대정 가을감자를 직접 공수해 만드는 쫄깃한 감자옹심이와 감자전이 인기인 마을 식당입니다.",
+            "latitude": 33.526800,
+            "longitude": 126.897200,
+            "administrative_area": "종달리"
+        },
+        # 호밀 - 우도면 연평리
+        {
+            "crop_tag": "호밀",
+            "title": "우도 호밀밭 베이커리",
+            "address": "제주시 우도면 연평리 587-3",
+            "road_address": "제주시 우도면 우도해안길 158",
+            "phone": "064-782-5873",
+            "introduction": "우도 겨울 방풍 호밀밭 옆에 자리한 작은 베이커리로, 통호밀빵과 호밀 크래커를 직접 굽습니다.",
+            "latitude": 33.507200,
+            "longitude": 126.953100,
+            "administrative_area": "연평리"
+        },
+        # 브로콜리 - 대정읍 무릉리
+        {
+            "crop_tag": "브로콜리",
+            "title": "무릉외갓집 브로콜리밥상",
+            "address": "서귀포시 대정읍 무릉리 1203",
+            "road_address": "서귀포시 대정읍 신영로 456",
+            "phone": "064-794-1203",
+            "introduction": "애월 곽지리에서 시작된 제주 브로콜리 재배 역사를 소개하며, 브로콜리 두부무침 정식을 내는 시골 밥상입니다.",
+            "latitude": 33.253600,
+            "longitude": 126.253900,
+            "administrative_area": "무릉리"
+        },
+        # 양배추 - 한림읍 협재리
+        {
+            "crop_tag": "양배추",
+            "title": "협재 월동양배추 김치공방",
+            "address": "제주시 한림읍 협재리 1552-6",
+            "road_address": "제주시 한림읍 협재로 44",
+            "phone": "064-796-1552",
+            "introduction": "한림 소구형 월동양배추로 담근 아삭한 양배추 김치와 양배추롤을 맛볼 수 있는 체험형 공방입니다.",
+            "latitude": 33.394200,
+            "longitude": 126.239500,
+            "administrative_area": "협재리"
+        },
+        # 콜라비 - 한경면 고산리
+        {
+            "crop_tag": "콜라비",
+            "title": "고산리 콜라비 피클하우스",
+            "address": "제주시 한경면 고산리 3785",
+            "road_address": "제주시 한경면 고산로 12",
+            "phone": "064-772-3785",
+            "introduction": "이색 겨울 작물 콜라비를 새콤달콤하게 절인 콜라비 피클과 콜라비 라페를 판매하는 작은 로컬 매장입니다.",
+            "latitude": 33.303100,
+            "longitude": 126.163900,
+            "administrative_area": "고산리"
+        },
+        # 수박 - 애월읍 고내리
+        {
+            "crop_tag": "수박",
+            "title": "고내리 여름수박화채",
+            "address": "제주시 애월읍 고내리 1088",
+            "road_address": "제주시 애월읍 고내로 233",
+            "phone": "064-799-1088",
+            "introduction": "제주 서부 노지수박으로 만든 시원한 수박화채와 수박주스를 즐길 수 있는 여름 한정 카페입니다.",
+            "latitude": 33.459700,
+            "longitude": 126.324700,
+            "administrative_area": "고내리"
+        },
+        # 배추 - 조천읍 조천리
+        {
+            "crop_tag": "배추",
+            "title": "조천리 김장배추 손칼국수",
+            "address": "제주시 조천읍 조천리 2337",
+            "road_address": "제주시 조천읍 조천북로 27",
+            "phone": "064-783-2337",
+            "introduction": "가을 노지배추로 담근 겉절이와 손칼국수를 함께 내는 마을 어르신들의 정겨운 식당입니다.",
+            "latitude": 33.541200,
+            "longitude": 126.642800,
+            "administrative_area": "조천리"
+        },
+        # 참외 - 조천읍 신촌리
+        {
+            "crop_tag": "참외",
+            "title": "조천 노란참외 화채가게",
+            "address": "제주시 조천읍 신촌리 464-2",
+            "road_address": "제주시 조천읍 신촌북길 19",
+            "phone": "064-783-4642",
+            "introduction": "한여름 노지참외로 만든 샛노란 참외화채와 참외빙수를 파는 계절 한정 간식 가게입니다.",
+            "latitude": 33.536800,
+            "longitude": 126.665300,
+            "administrative_area": "신촌리"
+        },
+        # 쪽파 - 구좌읍 김녕리
+        {
+            "crop_tag": "쪽파",
+            "title": "김녕리 쪽파전 막걸리집",
+            "address": "제주시 구좌읍 김녕리 1621-4",
+            "road_address": "제주시 구좌읍 김녕로8길 5",
+            "phone": "064-782-1621",
+            "introduction": "가을 씨쪽파와 김장철 수확 쪽파로 부친 바삭한 쪽파전에 제주 막걸리를 곁들이는 동네 술집입니다.",
+            "latitude": 33.556100,
+            "longitude": 126.760500,
+            "administrative_area": "김녕리"
+        },
+        # 양파 - 구좌읍 김녕리
+        {
+            "crop_tag": "양파",
+            "title": "김녕 조생양파 스프가게",
+            "address": "제주시 구좌읍 김녕리 2033",
+            "road_address": "제주시 구좌읍 김녕로 120",
+            "phone": "064-782-2033",
+            "introduction": "제주 조생종 양파를 오래 우려낸 담백한 양파스프와 양파튀김을 내는 작은 브런치 가게입니다.",
+            "latitude": 33.554700,
+            "longitude": 126.759800,
+            "administrative_area": "김녕리"
         }
     ]
     
@@ -253,9 +401,10 @@ def _get_mock_recommendations(crop_tag: str, administrative_area: str) -> List[D
                 "latitude": item["latitude"],
                 "longitude": item["longitude"],
                 "administrative_area": item["administrative_area"],
+                "source": "mock_db",
                 "metadata": {}
             })
-            
+
     # 매칭된 것이 없을 경우, 작물 태그가 같은 매장들을 행정구역 제약 없이 전체 추천으로 Fallback
     if not results:
         for item in mock_db:
@@ -270,6 +419,7 @@ def _get_mock_recommendations(crop_tag: str, administrative_area: str) -> List[D
                     "latitude": item["latitude"],
                     "longitude": item["longitude"],
                     "administrative_area": item["administrative_area"],
+                    "source": "mock_db",
                     "metadata": {}
                 })
                 

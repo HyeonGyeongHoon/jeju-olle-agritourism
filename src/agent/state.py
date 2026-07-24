@@ -31,3 +31,7 @@ class AgentState(TypedDict):
     # 5. 품질 평가 및 자율 순환 제어 정보
     quality_report: Optional[Dict[str, Any]]
     loop_count: int
+    tool_calls: Optional[List[Dict[str, Any]]]
+    tool_outputs: Optional[List[Dict[str, Any]]]
+    tool_depth: Optional[int]
+
