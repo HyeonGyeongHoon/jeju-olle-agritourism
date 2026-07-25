@@ -7,7 +7,7 @@ from datetime import date
 from typing import Dict, Any, List
 from src.agent.llm_client import get_chat_completion
 from src.agent.weather_client import assess_weather_risk_from_query, get_seasonal_climate_note
-from src.agent.router import route_intent
+from src.agent.router import _SPECIFIC_COURSE_PATTERN, route_intent
 from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
 from src.models.schema import B2BQueryParams, IntentCategory
@@ -531,17 +531,39 @@ def _crop_label_matches(
     return not key_is_known_crop
 
 
+# _fetch_course_meta_by_name 이 조회하는 컬럼. crops/administrative_areas 는 검색 조건 보완용,
+# 나머지 실측 수치는 quick_responder_node 가 "이 코스 괜찮아?/초보자한테 적합해?" 같은 의견·
+# 적합성 질의에 DB 근거로 답하기 위해 필요합니다(2026-07-25 라이브 QA: 이 수치들이 없던 탓에
+# LLM 이 "7코스는 비교적 평탄해 초보자도 좋다"처럼 근거 없는 추측을 답변에 넣었음. 실제 7코스는
+# 17.6km / 6시간 / 난이도 중).
+_COURSE_META_COLUMNS = (
+    "course_name, crops, administrative_areas, total_distance_km, estimated_time_hours, "
+    "estimated_time_text, difficulty, start_point, end_point"
+)
+
+# 코스 의견/적합성 답변에 인용할 실측 수치의 표시 라벨 (컬럼 → 라벨, 단위)
+_COURSE_META_DISPLAY_FIELDS = (
+    ("total_distance_km", "총 거리", "km"),
+    ("estimated_time_hours", "예상 소요시간", "시간"),
+    ("estimated_time_text", "소요시간 안내", ""),
+    ("difficulty", "난이도", ""),
+    ("start_point", "시작점", ""),
+    ("end_point", "종점", ""),
+)
+
+
 def _fetch_course_meta_by_name(client: Any, course_name: str) -> Dict[str, Any] | None:
-    """target_course(라우터가 질의에서 인식한 특정 코스명)로 해당 코스의 crops/
-    administrative_areas 메타데이터를 조회합니다. quick_responder_node가 코스명이 언급된
-    질의에서 그 코스의 작물/지역을 검색 조건으로 자동 보완하는 데 사용합니다. 조회 실패 시
+    """target_course(라우터가 질의에서 인식한 특정 코스명)로 해당 코스의 메타데이터를
+    조회합니다(작물/경유 행정구역 + 거리·소요시간·난이도·시작/종점 실측치).
+    quick_responder_node가 코스명이 언급된 질의에서 그 코스의 작물/지역을 검색 조건으로
+    자동 보완하고, 의견·적합성 질의에 실측 수치를 근거로 답하는 데 사용합니다. 조회 실패 시
     None을 반환해 상위 로직이 그대로 key_item_or_crop/preferred_location 없이 진행하도록
     합니다(다른 DB 조회 헬퍼들과 동일한 fail-soft 방식).
     """
     try:
         res = (
             client.table("courses")
-            .select("course_name, crops, administrative_areas")
+            .select(_COURSE_META_COLUMNS)
             .eq("course_name", course_name)
             .limit(1)
             .execute()
@@ -550,6 +572,69 @@ def _fetch_course_meta_by_name(client: Any, course_name: str) -> Dict[str, Any] 
     except Exception as e:
         print(f"[!] 코스 메타데이터(target_course={course_name}) 조회 실패, 생략합니다: {e}")
         return None
+
+
+def _build_course_meta_context_str(course_meta: Dict[str, Any] | None) -> str:
+    """코스 메타데이터를 LLM 프롬프트에 넣을 "라벨: 값" 목록 문자열로 만듭니다. 값이 없는
+    필드는 아예 넣지 않아, LLM 이 빈 값을 보고 추측으로 메우지 않도록 합니다.
+    """
+    if not course_meta:
+        return ""
+    lines = []
+    for column, label, unit in _COURSE_META_DISPLAY_FIELDS:
+        value = course_meta.get(column)
+        if value in (None, ""):
+            continue
+        lines.append(f"- {label}: {value}{unit}")
+    crops = (course_meta.get("crops") or "").strip()
+    if crops:
+        lines.append(f"- 대표 재배 작물: {crops}")
+    areas = (course_meta.get("administrative_areas") or "").strip()
+    if areas:
+        lines.append(f"- 경유 행정구역: {areas}")
+    return "\n".join(lines)
+
+
+def _looks_like_course_name(value: str | None) -> bool:
+    """값이 지역명이 아니라 코스명 표기("1코스"/"10-1코스"/"3-A코스")인지 판별합니다.
+    intent_parser 의 preferred_location 은 "질문에 지역/코스명이 직접 언급된 경우" 채우도록
+    지시되어 있어, 코스명이 지역 필드로 들어오는 경우가 실제로 발생합니다(2026-07-25 라이브
+    QA: "1코스 괜찮을지 추천해줄래?" → preferred_location='1코스'). 코스명을 지역으로 쓰면
+    통계 조회가 실패하거나(도구가 "조회 가능한 지역: ..." 목록을 반환해 LLM 이 그대로 다른
+    지역을 추천하는 정책 위반 경로가 됨) 지역 필터가 "10-1코스" 같은 다른 코스에 부분
+    일치하는 위험이 있습니다. 라우터의 코스명 표기 패턴을 재사용해(중복 정의 방지) 값 전체가
+    코스명인지 검사합니다.
+    """
+    if not value:
+        return False
+    return _SPECIFIC_COURSE_PATTERN.fullmatch(value.strip()) is not None
+
+
+def _resolve_stats_region_from_areas(client: Any, administrative_areas: str | None) -> str | None:
+    """코스의 administrative_areas(법정리/법정동 단위, 쉼표 구분)에서 방문객 통계 조회에
+    실제로 쓸 수 있는 행정동/읍/면 하나를 골라 반환합니다. courses 와 visitor_analytics 는
+    행정 단위 계층이 달라서(법정리 vs 행정동) 앞의 값을 그대로 쓰면 통계 조회가 실패하고,
+    그 실패 메시지가 "조회 가능한 지역" 목록을 노출해 다른 지역 추천으로 이어집니다.
+    후보를 하나도 검증할 수 없으면 None 을 반환합니다 — 확신 없는 지역을 넘기는 것보다
+    지역 없이 진행하는 게 안전하기 때문입니다(fail-closed).
+    """
+    if not administrative_areas:
+        return None
+    try:
+        olle_dongs = _get_olle_relevant_admin_dongs(client)
+    except Exception as e:
+        print(f"[!] 올레 경유 행정동 목록 조회 실패, 통계 지역 없이 진행합니다: {e}")
+        return None
+    if not olle_dongs:
+        return None
+    for area in administrative_areas.split(","):
+        area = area.strip()
+        if not area:
+            continue
+        for candidate in _LEGAL_DONG_TO_ADMIN_DONG.get(area, [area]):
+            if candidate in olle_dongs:
+                return candidate
+    return None
 
 
 def _search_culture_knowledge(
@@ -626,6 +711,16 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     preferred_location = b2b_params.get("preferred_location")
     target_month = b2b_params.get("target_month")
 
+    # preferred_location 에 지역명이 아니라 코스명이 들어온 경우("1코스로 기획서 만들어줘" →
+    # intent_parser 가 preferred_location='1코스' 로 채움)를 지역 조건으로 쓰지 않습니다.
+    # 코스 지목은 이미 target_course 필터가 처리하며, 코스명을 지역으로 쓰면 (1) 지역 필터가
+    # 0건이 되어 "'1코스' 지역과 겹치는 코스가 없다"는 엉뚱한 각주가 붙고, (2) 부분 일치인
+    # _crop_location_boost 가 "1코스"를 "10-1코스"의 course_name 에 매칭시켜 전혀 다른 코스를
+    # 상위로 끌어올립니다(코스명 접두사 충돌 — _filter_course_ids_by_target_course 가 완전
+    # 일치로 바뀐 것과 같은 이유).
+    if _looks_like_course_name(preferred_location):
+        preferred_location = None
+
     hard = constraints.get("hard_constraints", {})
     vector_query = constraints.get("vector_query", state["query"])
 
@@ -659,10 +754,21 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         course_ids, target_course_matched = _filter_course_ids_by_target_course(client, course_ids, target_course)
         if not target_course_matched:
             fallback_applied = True
-            fallback_reason = (
-                f"'{target_course}' 코스명과 직접 일치하는 코스를 찾지 못해, "
-                f"해당 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
-            )
+            # target_course가 실존하는 코스인데 하드 제약(휠체어 등) 때문에 후보에서 빠진
+            # 경우("2코스는 존재하지만 휠체어 구간이 없음")는, target_course 자체가 DB에 없는
+            # 경우("가파도"처럼 정식 코스명이 아님)와 다르게 취급합니다. 후자는 사용자가 어떤
+            # 코스를 뜻했는지 애매하니 전체에서 계속 찾는 게 맞지만, 전자는 사용자가 지목한
+            # "그 코스"가 명확히 존재하는데 하드 제약을 못 만족하는 것이므로, 다른 코스로 조용히
+            # 대체 추천하지 않고 기획서 작성을 중단하여 이유만 정직하게 답합니다(사용자 요청).
+            hard_constraint_reason = _describe_target_course_mismatch(client, target_course, hard)
+            if hard_constraint_reason:
+                course_ids = []
+                fallback_reason = hard_constraint_reason
+            else:
+                fallback_reason = (
+                    f"'{target_course}' 코스명과 직접 일치하는 코스를 찾지 못해, "
+                    f"해당 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
+                )
 
     # 지역 조건(preferred_location)을 벡터 검색 이전에 실제 하드 필터로 반영합니다. 이게 없으면
     # 벡터 검색이 먼저 의미상 가장 비슷한 상위 몇 개만 뽑고 그 안에서만 지역 boost를 적용해,
@@ -814,11 +920,14 @@ def _filter_course_ids_by_target_course(
 ) -> tuple[List[int], bool]:
     """course_ids 중 target_course(질의에 특정 코스가 언급된 경우 라우터가 추출한 값 — "1코스"
     같은 정식 코스명뿐 아니라 "가파도"처럼 섬/지명이 섞여 들어올 수도 있음)와 실제로 겹치는
-    코스만 남깁니다. _filter_course_ids_by_location 과 동일하게 course_name/administrative_areas
-    부분 일치로 판정하고, 하나도 안 겹치면(완전 배제 대신) 원래 course_ids 를 그대로 반환하고
-    두 번째 반환값을 False 로 표시합니다 — 이후 pgvector 유사도 검색은 코스 본문(가이드북 원문)에
-    실제로 언급된 지명까지 의미 기반으로 잡아낼 수 있어, 이 필터가 못 걸러도 최종 결과가 완전히
-    빗나가지 않는 경우가 많습니다.
+    코스만 남깁니다. course_name은 반드시 완전 일치("1코스"가 "10-1코스"/"7-1코스"/"14-1코스"/
+    "18-1코스"처럼 뒤에 "1코스"로 끝나는 다른 코스와 부분 문자열로 오매칭되는 것을 방지 —
+    2026-07-24 QA 중 실제로 "1코스"를 요청했는데 "10-1코스"(가파도)가 선택되는 것으로 재현됨),
+    administrative_areas는 지역명이 이런 접두사+하이픈+번호 충돌 패턴이 없어 기존처럼 부분 일치로
+    판정합니다. 하나도 안 겹치면(완전 배제 대신) 원래 course_ids 를 그대로 반환하고 두 번째
+    반환값을 False 로 표시합니다 — 이후 pgvector 유사도 검색은 코스 본문(가이드북 원문)에 실제로
+    언급된 지명까지 의미 기반으로 잡아낼 수 있어, 이 필터가 못 걸러도 최종 결과가 완전히 빗나가지
+    않는 경우가 많습니다.
     """
     if not target_course or not course_ids:
         return course_ids, False
@@ -832,11 +941,38 @@ def _filter_course_ids_by_target_course(
     matched_ids = [
         row["id"]
         for row in (res.data or [])
-        if target_course in (row.get("course_name") or "") or target_course in (row.get("administrative_areas") or "")
+        if target_course == (row.get("course_name") or "") or target_course in (row.get("administrative_areas") or "")
     ]
     if matched_ids:
         return matched_ids, True
     return course_ids, False
+
+
+def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict) -> str | None:
+    """target_course가 후보에서 빠진 구체적인 이유를 알아낼 수 있으면 반환합니다. 특히
+    target_course가 실제로 존재하는 코스인데 하드 제약(현재는 휠체어) 때문에 후보에서
+    제외된 경우("2코스는 실존하지만 휠체어 구간이 없음"), "그 코스명을 못 찾았다"는 일반
+    문구 대신 정확한 사유를 사용자에게 알립니다. **(2026-07-24 수정)** 이 경우 다른 코스로
+    조용히 대체 추천하지 않고 기획서 작성 자체를 중단합니다(사용자 요청) — 그래서 이
+    사유 문구도 "다른 코스로 대체 추천합니다"가 아니라 "왜 작성할 수 없는지"만 명시해야
+    합니다. target_course가 애초에 DB에 없는 코스명이면(예: "가파도") 알아낼 수 없으므로
+    None을 반환해 호출부가 일반 문구를 쓰게 합니다.
+    """
+    if not hard.get("wheelchair_required"):
+        return None
+    try:
+        res = (
+            client.table("courses")
+            .select("course_name,has_wheelchair_segment")
+            .eq("course_name", target_course)
+            .execute()
+        )
+    except Exception as e:
+        print(f"[!] target_course 실존 여부 확인 실패: {e}")
+        return None
+    if res.data and res.data[0].get("has_wheelchair_segment") != "있음":
+        return f"'{target_course}'에는 휠체어로 이용 가능한 구간이 없습니다."
+    return None
 
 
 def _filter_course_ids_by_location(
@@ -979,6 +1115,13 @@ def _build_market_insight_summary_str(market_insight: Dict[str, Any] | None) -> 
     return "📊 " + ", ".join(parts)
 
 
+_OUT_OF_SCOPE_DECLINE_MSG = (
+    "이 서비스는 개별 코스를 추천해 드리지 않고, 방문 시기·작물·지역·테마 조건에 맞춘 "
+    "B2B 관광 상품 기획서를 자동으로 작성해 드립니다. 코스 추천이 아니라 "
+    "'~코스로 기획서 만들어줘'처럼 요청해 주시면 도와드릴 수 있습니다."
+)
+
+
 def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     """기획서 생성 없이, 제주 밭담문화·작물 생육 지식과 관광 방문객 통계만 검색해 간결한 정보성
     답변을 빠르게 제공하는 Quick Responder 노드입니다. course_recommendation 을 제외한
@@ -986,7 +1129,20 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     safety_evaluator/코스 검색/report_generator 를 전부 건너뜁니다.
     retrieved_chunks 는 건드리지 않고 빈 상태 그대로 둡니다 — 코스 검색을 하지 않았다는 사실 자체가
     check_quality_node 등 하류 노드에 "이 경로는 코스 기획서가 아니다"를 알리는 신호로 쓰입니다.
+    **(2026-07-25 추가)** `other`로 분류된 질의는 두 가지입니다 — 제주 올레와 아예 무관한 질문
+    (예: "서울 맛집 추천해줘")과, 제주 올레 관련이지만 기획서가 아니라 단순 코스 "추천"을
+    요청하는 질문(예: "당근 코스 추천해줘"). 이 서비스는 코스 추천 자체를 제공하지 않으므로
+    (사용자 요청: "코스 추천은 하지 않습니다"라고 명확히 예외 처리), 두 경우 모두 문화·작물
+    지식이나 통계를 검색해 대신 답하지 않고 서비스 범위를 안내한 뒤 즉시 종료합니다.
     """
+    if state.get("intent_category") == IntentCategory.OTHER.value:
+        return {
+            "culture_chunks": [],
+            "market_insight": None,
+            "docent_answer": _OUT_OF_SCOPE_DECLINE_MSG,
+            "final_response": _OUT_OF_SCOPE_DECLINE_MSG,
+        }
+
     query = state["query"]
     constraints = state.get("parsed_constraints") or {}
     b2b_params = state.get("b2b_params") or {}
@@ -1004,12 +1160,25 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     # preferred_location 을 못 채웠어도 그 코스의 실제 작물/지역으로 검색 조건을 보완합니다
     # (이전엔 target_course 가 아예 무시되어 코스명을 특정해도 일반 검색과 동일하게 동작했음).
     course_meta = _fetch_course_meta_by_name(client, target_course) if target_course else None
+
+    # preferred_location 에 지역명이 아니라 코스명이 들어온 경우(intent_parser 가 실제로 그렇게
+    # 채웁니다 — 2026-07-25 라이브 QA에서 "1코스 괜찮을지 추천해줄래?" → preferred_location=
+    # '1코스' 확인)를 지역 필드로서 무효 처리합니다. 예전엔 이 값이 truthy 라는 이유만으로 아래
+    # 보완 로직을 건너뛰어, 코스명이 그대로 tool_agent 의 통계 조회 지역 인자로 전달됐고,
+    # 도구가 반환한 "조회 가능한 지역: ..." 목록을 LLM 이 그대로 "대신 이 지역들을 추천드릴 수
+    # 있어요"로 노출해 — 라우팅 규칙으로 막으려던 "다른 코스/지역 추천"이 이 경로로 재발했습니다.
+    if _looks_like_course_name(preferred_location):
+        preferred_location = None
+
     if course_meta:
         if not key_item_or_crop:
             key_item_or_crop = (course_meta.get("crops") or "").split(",")[0].strip() or None
         if not preferred_location:
-            preferred_location = (
-                (course_meta.get("administrative_areas") or "").split(",")[0].strip() or None
+            # administrative_areas 는 법정리/법정동 단위라 visitor_analytics.region_dong
+            # (행정동/읍·면)과 계층이 달라 그대로 쓰면 통계 조회가 또 실패합니다. 통계 조회가
+            # 가능한 행정동/읍·면으로 변환해서만 채우고, 변환할 수 없으면 비워 둡니다.
+            preferred_location = _resolve_stats_region_from_areas(
+                client, course_meta.get("administrative_areas")
             )
 
     culture_chunks = _search_culture_knowledge(client, key_item_or_crop, fallback_query)
@@ -1034,19 +1203,38 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             f"{location_resolution.get('year_month')} 기준 {metric_label} 1위 지역으로 자동 선정되었습니다."
         )
 
-    course_note = f"\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다." if target_course else ""
+    # 코스가 지목된 질의는 코스명 라벨만 넘기지 않고 DB 실측치(거리/소요시간/난이도/시작·종점)를
+    # 함께 넘깁니다. 라벨만 넘겼을 때 LLM 이 "비교적 평탄해 초보자도 좋다"처럼 DB 근거 없는
+    # 추측으로 적합성을 단정하는 문제가 라이브 QA에서 확인됐습니다(2026-07-25).
+    course_note = ""
+    if target_course:
+        course_note = f"\n\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
+        course_meta_context_str = _build_course_meta_context_str(course_meta)
+        if course_meta_context_str:
+            course_note += (
+                f"\n[대상 코스 DB 실측 메타데이터]\n{course_meta_context_str}"
+            )
+        else:
+            course_note += "\n[대상 코스 DB 실측 메타데이터] (조회하지 못했습니다.)"
 
-    if culture_chunks or market_insight:
+    if culture_chunks or market_insight or course_meta:
         system_prompt = """당신은 제주올레 B2B 기획서 도슨트의 사전 정보 조회 도우미입니다.
-기획서를 작성하는 게 아니라, 기획자가 궁금해하는 제주 문화·작물 지식이나 관광 방문객 통계를
-간결한 설명체로 답변하세요.
+기획서를 작성하는 게 아니라, 기획자가 궁금해하는 제주 문화·작물 지식이나 관광 방문객 통계,
+또는 특정 올레 코스에 대한 정보를 간결한 설명체로 답변하세요.
 
 [절대 규칙]
-1. 아래 [문화·작물 지식 검색 결과]와 [관광 방문객 통계]에 없는 사실을 지어내지 마세요.
+1. 아래 [문화·작물 지식 검색 결과], [관광 방문객 통계], [대상 코스 DB 실측 메타데이터]에 없는
+   사실을 지어내지 마세요.
 2. 표/섹션 헤더 같은 기획서 형식을 쓰지 말고, 자연스러운 문단(또는 필요시 짧은 불릿)으로 답변하세요.
 3. 문화지식 항목에 "제철"/"제철 아님" 표시가 있으면 그 표시를 반영해 서술하세요.
 4. 검색 결과 중 질문과 무관한 내용은 언급하지 마세요.
-5. 두 문단을 넘지 않게 간결히 답하세요."""
+5. 두 문단을 넘지 않게 간결히 답하세요.
+6. 코스의 난이도·소요시간·적합성(초보자/가족/단체 등)에 대한 판단은 반드시 [대상 코스 DB 실측
+   메타데이터]의 거리·소요시간·난이도 수치를 근거로 인용해서 말하세요. 그 수치가 없으면
+   "확인되지 않았다"고 밝히고 단정하지 마세요. "비교적 평탄하다"처럼 데이터에 없는 지형·체력
+   판단을 추측으로 덧붙이지 마세요.
+7. 질문이 특정 코스에 대한 것이면 다른 코스나 다른 지역을 대안으로 추천하지 마세요(이 서비스는
+   코스 추천을 제공하지 않습니다). 통계나 문서를 찾지 못했으면 찾지 못했다고만 밝히세요."""
         user_msg = (
             f"[질문]: {query}\n\n"
             f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
@@ -1059,7 +1247,19 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             "찾지 못했습니다. 질문을 조금 더 구체적으로 말씀해 주시면 다시 찾아보겠습니다."
         )
 
+    # 보완/정정한 검색 조건을 state 에 다시 써서 하류 노드(tool_agent_node)가 같은 값을 보게
+    # 합니다. 이게 없으면 이 노드는 지역 오염을 로컬 변수에서만 고치고, tool_agent_node 는
+    # 여전히 state 의 b2b_params.preferred_location(='1코스')을 읽어 통계 도구를 잘못된 지역으로
+    # 호출합니다 — 상류 노드의 결정을 하류 노드가 뒤엎는 이 프로젝트의 전형적 경계면 버그입니다.
+    updated_b2b_params = {
+        **b2b_params,
+        "key_item_or_crop": key_item_or_crop,
+        "preferred_location": preferred_location,
+    }
+
     return {
+        "b2b_params": updated_b2b_params,
+        "course_meta": course_meta,
         "culture_chunks": culture_chunks,
         "market_insight": market_insight,
         "docent_answer": answer,
@@ -1131,7 +1331,16 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
     direct_retry 경로는 그 노드를 거치지 않으므로). 그래서 품질 검증 실패로 인한 재시도(재답변
     생성) 때만 loop_count 를 1 증가시켜, "direct_retry"가 최대 2회로 확실히 끝나고 그 이후는
     should_continue 가 "rewrite" 경로로 넘어가도록 합니다.
+    **(2026-07-25 추가)** `intent_category == "other"` 인 경우, quick_responder_node 가 이미
+    서비스 범위 안내(코스 추천 미제공) 최종 답변을 만들어뒀습니다. 이 노드는 b2b_params 에
+    key_item_or_crop/preferred_location 등이 있으면 그 값만 보고 자동으로 도구를 호출하는데,
+    "other"를 이 검사 없이 그대로 통과시키면 quick_responder_node 의 범위 안내 결정을 무시하고
+    엉뚱하게 그 작물/지역 정보를 검색해 실질적으로 "코스 추천"에 가까운 답을 다시 생성해버립니다
+    (사용자 요청으로 발견: "당근 코스 추천해줘"). 그래서 "other"는 도구 호출 없이 그대로 종료합니다.
     """
+    if state.get("intent_category") == IntentCategory.OTHER.value and not (state.get("tool_outputs") or []):
+        return {"tool_calls": None}
+
     query = state["query"]
     tool_outputs = state.get("tool_outputs") or []
     depth = state.get("tool_depth") or 0
@@ -1154,13 +1363,36 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         for i, out in enumerate(tool_outputs):
             tools_context_str += f"\n--- [도구 {i+1}: {out['tool_name']}] ---\n{out['result']}\n"
 
+    # 2-1. 특정 코스가 지목된 질의는 그 코스의 DB 실측 메타데이터를 근거로 함께 넘깁니다.
+    # 최종 사용자 답변은 quick_responder_node 가 아니라 이 노드가 쓰는 경우가 많은데(도구를
+    # 한 번이라도 호출하면 이 노드가 final_response 를 덮어씀), 예전엔 이 노드의 프롬프트에
+    # 도구 결과만 들어가서 코스 실측치가 최종 답변에 전달되지 않았습니다. 게다가 아래 절대규칙
+    # 2번("가용 옵션 목록을 대안으로 되물어 안내")이 특정 코스 질의에서는 "대신 다른 지역을
+    # 추천"으로 변질돼 코스/지역 추천 금지 정책을 우회하는 경로가 됐습니다(2026-07-25 라이브 QA).
+    course_scope_note = ""
+    target_course = state.get("target_course")
+    if target_course:
+        course_scope_note = f"\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
+        course_meta_context_str = _build_course_meta_context_str(state.get("course_meta"))
+        if course_meta_context_str:
+            course_scope_note += (
+                f"\n[대상 코스 DB 실측 메타데이터 (적합성·난이도 판단은 이 수치만 근거로 인용)]\n"
+                f"{course_meta_context_str}"
+            )
+        course_scope_note += (
+            "\n[주의] 이 질문은 특정 코스에 대한 것이므로 다른 코스나 다른 지역을 대안으로 "
+            "추천하지 마세요. 도구 결과가 특정 지역/기간을 조회할 수 없다는 안내라면 그 사실만 "
+            "간단히 밝히고, 위 실측 메타데이터를 근거로 답하세요. 데이터에 없는 지형·체력 판단을 "
+            "추측으로 덧붙이지 마세요.\n"
+        )
+
     # 3. max depth (3회) 도달 시 방어 조치: 더 이상 도구를 부르지 못하게 제한
     if depth >= 3:
         system_prompt = """당신은 제주 문화·작물 지식 및 관광 통계를 친절히 안내하는 전문 챗봇입니다.
 도구 호출 한도에 도달했으므로, 현재까지 확보된 [실행된 도구 조회 결과]만을 바탕으로 사용자의 질문에
 가장 정확하고 친절하게 답변하세요. 도구가 반환한 에러 가이드(가용 월/지역 옵션 등)가 있다면
 사용자에게 그대로 친절히 안내하세요."""
-        user_msg = f"사용자 질문: {query}\n{feedback_note}{tools_context_str}"
+        user_msg = f"사용자 질문: {query}\n{feedback_note}{course_scope_note}{tools_context_str}"
         answer = get_chat_completion(system_prompt, user_msg)
         result = {
             "docent_answer": answer,
@@ -1202,16 +1434,31 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         if pending_tool_calls:
             return {"tool_calls": pending_tool_calls}
 
+        # 호출할 도구도 없고 이미 확보된 도구 결과도 없으면, 이 노드가 새로 알아낸 정보는
+        # 아무것도 없습니다. 그런데도 아래에서 재답변을 생성하면 컨텍스트가 텅 빈 상태로
+        # LLM 에 질문만 던지게 되어, quick_responder_node 가 DB 근거(코스 실측치/문화지식/통계)로
+        # 만들어 둔 답변을 근거 없는 일반 지식 답변으로 덮어씁니다(2026-07-25 발견).
+        # 근거가 하나라도 있었던 답변은 그대로 유지합니다. 반대로 근거가 아무것도 없어서
+        # quick_responder 가 "찾지 못했습니다"로 끝낸 경우는 기존 동작(일반 지식 재답변)을
+        # 유지합니다 — 그 경로의 동작 변경은 이번 수정 범위가 아닙니다. 품질 재시도 경로도
+        # loop_count 증가가 필요하므로(무한 루프 방지) 아래 재생성 로직을 그대로 타게 둡니다.
+        has_grounded_answer = bool(
+            state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
+        )
+        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
+            return {"tool_calls": None}
+
     # 도구 결과를 바탕으로 답변 생성
     system_prompt = """당신은 제주 올레길 탐방객과 기획자를 위한 친절하고 명확한 도슨트 챗봇입니다.
 아래 [실행된 도구 조회 결과]를 바탕으로 자연스러운 문단으로 답변하세요.
 
 [절대 규칙]
 1. 도구 조회 결과에 명시된 수치와 단위(명, %, 톤 등)를 절대로 변경하거나 지어내지 마세요.
-2. 도구 결과가 [오류] 또는 [안내] 메시지(미지원 지역/기간 및 가용 옵션 목록)일 경우, 사용자가 다른 유효 옵션을 선택할 수 있도록 대안 목록을 친절하게 되물어 안내하세요.
-3. 2문단 이내로 간결하고 친근하게 작성하세요."""
+2. 도구 결과가 [오류] 또는 [안내] 메시지(미지원 지역/기간 및 가용 옵션 목록)일 경우, 사용자가 다른 유효 옵션을 선택할 수 있도록 대안 목록을 친절하게 되물어 안내하세요. 단, [대상 코스]가 지정된 질문에서는 이 안내를 다른 코스·지역 추천으로 바꾸지 말고, [주의] 지시를 우선하세요.
+3. 2문단 이내로 간결하고 친근하게 작성하세요.
+4. [대상 코스 DB 실측 메타데이터]가 주어졌다면 코스의 난이도·소요시간·적합성 판단은 반드시 그 수치를 인용해 말하고, 없는 수치는 "확인되지 않았다"고 밝히세요."""
 
-    user_msg = f"사용자 질문: {query}\n{feedback_note}{tools_context_str}"
+    user_msg = f"사용자 질문: {query}\n{feedback_note}{course_scope_note}{tools_context_str}"
     answer = get_chat_completion(system_prompt, user_msg)
 
     result = {
@@ -1257,7 +1504,13 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     target_month = b2b_params.get("target_month") or date.today().month
 
     if not chunks:
-        fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
+        # fallback_reason 이 있으면(예: 지정한 코스가 하드 제약을 만족 못 해 retrieve_rag_node 가
+        # 대체 추천 없이 검색을 중단시킨 경우) 그 구체적인 사유를 그대로 안내합니다. 다른 코스로
+        # 조용히 대체하지 않고 "왜 기획서를 못 만드는지"만 정직하게 답하고 종료합니다(사용자 요청).
+        if fallback and reason:
+            fallback_msg = f"요청하신 조건으로는 기획서를 작성할 수 없습니다. {reason}"
+        else:
+            fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
         return {"docent_answer": fallback_msg, "final_response": fallback_msg}
 
     # 코스 컨텍스트 빌드

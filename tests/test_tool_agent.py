@@ -101,6 +101,28 @@ def test_tool_agent_max_depth_guard():
     assert res.get("final_response") is not None
 
 
+def test_tool_agent_node_skips_tool_calls_for_other_intent():
+    """사용자 요청: "당근 코스 추천해줘"처럼 intent_category가 "other"인 질의는,
+    quick_responder_node가 이미 서비스 범위 안내(코스 추천 미제공) 답변을 만들어뒀으므로,
+    tool_agent_node가 b2b_params의 key_item_or_crop 등을 보고 자동으로 도구를 호출해 그
+    결정을 뒤엎지 않아야 합니다."""
+    state: AgentState = {
+        "query": "당근 코스 추천해줘",
+        "intent_category": "other",
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "b2b_params": {"key_item_or_crop": "당근", "preferred_location": None, "market_location_query": None},
+        "final_response": "이 서비스는 개별 코스를 추천해 드리지 않고...",
+    }
+
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_not_called()
+    assert res.get("tool_calls") is None
+
+
 def test_hybrid_correction_routing():
     """should_continue 라우터가 1차 실패(loop_count < 2) 시 direct_retry(interactive_agent), 2차 이상 실패 시 rewrite(query_rewriter)로 분기하는지 검증합니다."""
     # 1차 실패 케이스
@@ -243,6 +265,133 @@ def test_hybrid_correction_never_loops_forever_once_loop_count_advances():
             "loop_count": loop_count_2,
             "intent_category": IntentCategory.INFO_LOOKUP.value,
         }) == "rewrite"
+
+
+_COURSE_7_META = {
+    "course_name": "7코스",
+    "crops": "감귤",
+    "administrative_areas": "서홍동,법환동",
+    "total_distance_km": 17.6,
+    "estimated_time_hours": 6.0,
+    "estimated_time_text": "5~6시간",
+    "difficulty": "중",
+    "start_point": "제주올레 여행자센터",
+    "end_point": "월평 아왜낭목",
+}
+
+
+def test_tool_agent_includes_course_meta_and_no_alternative_recommendation_rule():
+    """회귀 방지: 최종 사용자 답변은 quick_responder_node 가 아니라 이 노드가 쓰는 경우가
+    많은데(도구를 한 번이라도 호출하면 final_response 를 덮어씀), 예전엔 이 노드 프롬프트에
+    도구 결과만 들어가 코스 실측치가 최종 답변에 전달되지 않아 "7코스는 비교적 평탄해 초보자도
+    좋다"는 근거 없는 답이 나왔습니다. 또 절대규칙 2번의 "가용 옵션 목록 안내"가 특정 코스
+    질의에서는 "대신 다른 지역 추천"으로 변질돼 정책을 우회했습니다."""
+    state: AgentState = {
+        "query": "7코스 초보자한테 추천할 만해?",
+        "target_course": "7코스",
+        "course_meta": _COURSE_7_META,
+        "tool_outputs": [{
+            "tool_name": "retrieve_visitor_statistics_tool",
+            "result": "[오류] '서홍동'은 올레 코스 경유 지역이 아니어서... 조회 가능한 지역: 강정동, 구좌읍, 성산읍",
+        }],
+        "tool_depth": 1,
+        "quality_report": None,
+        "loop_count": 0,
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km입니다.") as mock_llm:
+        tool_agent_node(state)
+
+    system_prompt, user_msg = mock_llm.call_args[0]
+    assert "17.6km" in user_msg
+    assert "난이도: 중" in user_msg
+    assert "다른 코스나 다른 지역을 대안으로 추천하지 마세요" in user_msg
+    assert "인용" in system_prompt
+
+
+def test_tool_agent_includes_course_meta_at_max_depth_branch():
+    """depth>=3 방어 분기도 최종 답변을 만들므로 같은 코스 근거/주의가 들어가야 합니다."""
+    state: AgentState = {
+        "query": "7코스 초보자한테 추천할 만해?",
+        "target_course": "7코스",
+        "course_meta": _COURSE_7_META,
+        "tool_outputs": [{"tool_name": "x", "result": "y"}],
+        "tool_depth": 3,
+        "quality_report": None,
+        "loop_count": 0,
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="답변") as mock_llm:
+        tool_agent_node(state)
+
+    _, user_msg = mock_llm.call_args[0]
+    assert "17.6km" in user_msg
+    assert "다른 코스나 다른 지역을 대안으로 추천하지 마세요" in user_msg
+
+
+def test_tool_agent_preserves_existing_answer_when_nothing_new_to_look_up():
+    """회귀 방지: 호출할 도구도, 확보된 도구 결과도 없으면 이 노드가 새로 알아낸 정보가 없는데도
+    예전엔 컨텍스트가 텅 빈 프롬프트로 재답변을 생성해, quick_responder_node 가 DB 근거로 만든
+    답변을 근거 없는 일반 지식 답변으로 덮어썼습니다."""
+    state: AgentState = {
+        "query": "7코스 초보자한테 추천할 만해?",
+        "target_course": "7코스",
+        "course_meta": _COURSE_7_META,
+        "b2b_params": {"preferred_location": None, "key_item_or_crop": None},
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "loop_count": 0,
+        "final_response": "7코스는 17.6km, 예상 6시간, 난이도 중입니다.",
+    }
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_not_called()
+    assert res == {"tool_calls": None}
+
+
+def test_tool_agent_still_regenerates_when_previous_answer_had_no_grounding():
+    """대조군: 근거를 하나도 찾지 못해 quick_responder 가 "찾지 못했습니다"로 끝낸 경우는
+    기존 동작(일반 지식 재답변)을 그대로 유지해야 합니다 — 근거 있는 답변만 보존합니다."""
+    state: AgentState = {
+        "query": "올레길 준비물 뭐가 있어?",
+        "target_course": None,
+        "course_meta": None,
+        "culture_chunks": [],
+        "market_insight": None,
+        "b2b_params": {"preferred_location": None, "key_item_or_crop": None},
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "loop_count": 0,
+        "final_response": "죄송합니다. ... 찾지 못했습니다.",
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="준비물 안내") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_called_once()
+    assert res["final_response"] == "준비물 안내"
+
+
+def test_tool_agent_still_regenerates_on_quality_retry_without_tool_outputs():
+    """단, 품질 재시도 경로에서는 loop_count 증가가 필요하므로(무한 루프 방지) 기존 답변 보존
+    분기로 빠지지 않고 재생성을 그대로 수행해야 합니다."""
+    state: AgentState = {
+        "query": "7코스 초보자한테 추천할 만해?",
+        "target_course": "7코스",
+        "course_meta": _COURSE_7_META,
+        "b2b_params": {"preferred_location": None, "key_item_or_crop": None},
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": {"passed": False, "feedback": "근거 부족"},
+        "loop_count": 0,
+        "final_response": "이전 답변",
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="재생성 답변") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_called_once()
+    assert res["loop_count"] == 1
+    assert res["final_response"] == "재생성 답변"
 
 
 def test_should_continue_fails_closed_on_malformed_quality_report():

@@ -1,7 +1,8 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.agent import nodes
-from src.agent.nodes import quick_responder_node
+from src.agent.nodes import _fetch_course_meta_by_name, quick_responder_node
 
 
 def _base_state(**b2b_overrides):
@@ -18,6 +19,28 @@ def _base_state(**b2b_overrides):
         "parsed_constraints": {"vector_query": "밭담문화"},
         "b2b_params": b2b_params,
     }
+
+
+def test_quick_responder_node_declines_course_recommendation_for_other_intent():
+    """사용자 요청: "당근 코스 추천해줘"처럼 intent_category가 "other"로 분류된 질의는
+    (제주 올레와 아예 무관하든, 기획서가 아닌 단순 코스 "추천"을 요청하는 것이든) 문화·작물
+    지식이나 통계를 검색해 대신 답하지 않고, 코스 추천을 제공하지 않는다는 서비스 범위 안내로
+    즉시 종료해야 합니다."""
+    state = _base_state(key_item_or_crop="당근")
+    state["intent_category"] = "other"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_search_culture_knowledge") as mock_search_culture, \
+         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion") as mock_llm:
+        result = quick_responder_node(state)
+
+    mock_search_culture.assert_not_called()
+    mock_fetch_market.assert_not_called()
+    mock_llm.assert_not_called()
+    assert "코스 추천" in result["final_response"] or "추천해 드리지 않" in result["final_response"]
+    assert result["culture_chunks"] == []
+    assert result["market_insight"] is None
 
 
 def test_quick_responder_node_builds_answer_from_culture_and_market():
@@ -140,6 +163,7 @@ def test_quick_responder_node_scopes_search_by_target_course_when_crop_and_locat
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta) as mock_fetch_course, \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "표선면"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=culture_chunks) as mock_search_culture, \
          patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
          patch.object(nodes, "get_chat_completion", return_value="1코스는 감귤로 유명합니다.") as mock_llm:
@@ -150,6 +174,211 @@ def test_quick_responder_node_scopes_search_by_target_course_when_crop_and_locat
     assert mock_fetch_market.call_args[0][1] == "성산읍"
     _, user_msg = mock_llm.call_args[0]
     assert "1코스" in user_msg
+
+
+# --- preferred_location 에 코스명이 들어오는 오염 방어 (2026-07-25 라이브 QA) ---
+
+def test_quick_responder_node_replaces_course_name_location_with_real_region():
+    """회귀 방지: intent_parser 가 "1코스 괜찮을지 추천해줄래?"에서 preferred_location='1코스'
+    (코스명 자체)를 채우는데, 예전 가드는 "값이 truthy 면 건너뛴다"였기 때문에 코스의 실제 지역이
+    끝까지 쓰이지 않았습니다. 그 결과 tool_agent 가 통계 도구를 region_dong='1코스'로 호출하고,
+    도구의 검증 실패 메시지("조회 가능한 지역: ...")를 LLM 이 그대로 "대신 이 지역들을
+    추천드릴 수 있어요"로 노출해 코스/지역 추천 금지 정책이 우회됐습니다."""
+    # administrative_areas 는 법정리 단위(시흥리) — 통계 테이블의 행정동/읍면(성산읍)과 계층이
+    # 다르므로 그대로 쓰면 안 되고 변환되어야 합니다.
+    course_meta = {"course_name": "1코스", "crops": "감귤", "administrative_areas": "시흥리,종달리"}
+    state = _base_state(preferred_location="1코스")
+    state["target_course"] = "1코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion", return_value="1코스는..."):
+        result = quick_responder_node(state)
+
+    # 통계 조회에도, 하류 노드가 읽는 state 에도 코스명이 아니라 실제 행정 지역이 쓰여야 합니다.
+    assert mock_fetch_market.call_args[0][1] == "성산읍"
+    assert result["b2b_params"]["preferred_location"] == "성산읍"
+
+
+def test_quick_responder_node_writes_corrected_location_back_to_state():
+    """하류 tool_agent_node 는 로컬 변수가 아니라 state 의 b2b_params.preferred_location 을
+    읽어 통계 도구 인자를 만듭니다. 이 노드가 정정한 값을 state 에 다시 쓰지 않으면
+    tool_agent 는 여전히 오염된 코스명으로 도구를 호출합니다(경계면 버그)."""
+    state = _base_state(preferred_location="10-1코스")
+    state["target_course"] = "10-1코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=None), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None), \
+         patch.object(nodes, "get_chat_completion", return_value="답변"):
+        result = quick_responder_node(state)
+
+    assert result["b2b_params"]["preferred_location"] is None
+    # 원래 b2b_params 의 다른 키는 보존되어야 합니다.
+    assert result["b2b_params"]["target_month"] == 5
+
+
+def test_quick_responder_node_clears_course_name_location_when_region_unresolvable():
+    """코스의 경유 행정구역을 통계 조회 가능한 행정동/읍·면으로 변환할 수 없으면, 검증되지 않은
+    지역을 넘기지 않고 비워야 합니다(fail-closed) — 잘못된 지역을 넘기면 도구가 다시 "조회 가능한
+    지역" 목록을 반환해 같은 정책 우회가 재발합니다."""
+    course_meta = {"course_name": "9코스", "crops": "감귤", "administrative_areas": "알수없는리"}
+    state = _base_state(preferred_location="9코스")
+    state["target_course"] = "9코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion", return_value="9코스는..."):
+        result = quick_responder_node(state)
+
+    assert mock_fetch_market.call_args[0][1] is None
+    assert result["b2b_params"]["preferred_location"] is None
+
+
+def test_quick_responder_node_keeps_real_region_location_untouched():
+    """대조군: preferred_location 이 실제 지역명이면(코스명 표기가 아니면) 그대로 유지해야
+    합니다 — 코스명 오염 방어가 정상적인 지역 조건을 지우면 안 됩니다."""
+    state = _base_state(preferred_location="구좌읍")
+    state["target_course"] = "1코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name",
+                      return_value={"course_name": "1코스", "crops": "감귤",
+                                    "administrative_areas": "시흥리"}), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion", return_value="답변"):
+        result = quick_responder_node(state)
+
+    assert mock_fetch_market.call_args[0][1] == "구좌읍"
+    assert result["b2b_params"]["preferred_location"] == "구좌읍"
+
+
+# --- 코스 의견/적합성 질의에 DB 실측치를 근거로 제공 (2026-07-25 라이브 QA) ---
+
+_COURSE_7_META = {
+    "course_name": "7코스",
+    "crops": "감귤",
+    "administrative_areas": "서홍동,법환동,강정동",
+    "total_distance_km": 17.6,
+    "estimated_time_hours": 6.0,
+    "estimated_time_text": "5~6시간",
+    "difficulty": "중",
+    "start_point": "제주올레 여행자센터",
+    "end_point": "월평 아왜낭목",
+}
+
+
+def test_quick_responder_node_puts_course_metrics_into_prompt():
+    """회귀 방지: 예전엔 course_note 가 "이 질문은 '7코스' 코스에 대한 것입니다"라는 라벨뿐이라
+    거리/소요시간/난이도가 LLM 에게 전달되지 않았고, 그 결과 "7코스는 비교적 평탄해서 초보자도
+    좋다"처럼 DB 근거 없는 추측이 답변에 들어갔습니다(실제 7코스는 17.6km/6시간/난이도 중)."""
+    state = _base_state(preferred_location="7코스")
+    state["query"] = "7코스 초보자한테 추천할 만해?"
+    state["target_course"] = "7코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=_COURSE_7_META), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"대천동"}), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None), \
+         patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km로...") as mock_llm:
+        quick_responder_node(state)
+
+    system_prompt, user_msg = mock_llm.call_args[0]
+    assert "17.6km" in user_msg
+    assert "6.0시간" in user_msg or "6시간" in user_msg
+    assert "5~6시간" in user_msg
+    assert "난이도: 중" in user_msg
+    assert "제주올레 여행자센터" in user_msg
+    # 수치를 근거로 인용하라는 지시와, 다른 코스/지역을 대안 추천하지 말라는 지시가 있어야 합니다.
+    assert "근거로 인용" in system_prompt
+    assert "추천하지 마세요" in system_prompt
+
+
+def test_quick_responder_node_answers_from_course_meta_without_culture_or_market():
+    """회귀 방지: 문화지식/통계가 둘 다 비어 있으면 예전엔 무조건 "찾지 못했습니다" 사과문으로
+    끝났습니다. 코스 메타데이터만 있어도 코스 의견 질의에는 답할 수 있어야 합니다(라이브에서
+    이 코스들의 실제 지역은 해당 월 통계가 없어 market_insight 가 None 이었음)."""
+    state = _base_state(preferred_location="7코스")
+    state["query"] = "7코스 초보자한테 추천할 만해?"
+    state["target_course"] = "7코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=_COURSE_7_META), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value=set()), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None), \
+         patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km입니다.") as mock_llm:
+        result = quick_responder_node(state)
+
+    mock_llm.assert_called_once()
+    assert result["final_response"] == "7코스는 17.6km입니다."
+    assert "찾지 못했습니다" not in result["final_response"]
+
+
+def test_fetch_course_meta_by_name_selects_opinion_relevant_columns():
+    """회귀 방지: 예전엔 select("course_name, crops, administrative_areas") 뿐이어서, 코스
+    적합성 판단에 필요한 거리/소요시간/난이도/시작·종점이 아예 조회되지 않았습니다."""
+    captured = {}
+
+    class _FakeTable:
+        def select(self, cols):
+            captured["cols"] = cols
+            return self
+
+        def eq(self, *args):
+            return self
+
+        def limit(self, *args):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[{"course_name": "7코스"}])
+
+    client = MagicMock()
+    client.table.return_value = _FakeTable()
+
+    assert _fetch_course_meta_by_name(client, "7코스") == {"course_name": "7코스"}
+    for column in (
+        "total_distance_km", "estimated_time_hours", "estimated_time_text",
+        "difficulty", "start_point", "end_point", "crops", "administrative_areas",
+    ):
+        assert column in captured["cols"]
+
+
+def test_quick_responder_node_omits_missing_course_metric_fields():
+    """DB 에 값이 없는 필드는 프롬프트에 넣지 않아야 합니다(빈 라벨을 보고 LLM 이 추측으로
+    메우는 것을 막기 위함)."""
+    course_meta = {
+        "course_name": "1코스", "crops": "감귤", "administrative_areas": "시흥리",
+        "total_distance_km": 15.1, "estimated_time_hours": None,
+        "estimated_time_text": None, "difficulty": "", "start_point": None, "end_point": None,
+    }
+    state = _base_state()
+    state["target_course"] = "1코스"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
+         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None), \
+         patch.object(nodes, "get_chat_completion", return_value="답변") as mock_llm:
+        quick_responder_node(state)
+
+    _, user_msg = mock_llm.call_args[0]
+    assert "15.1km" in user_msg
+    assert "예상 소요시간" not in user_msg
+    assert "난이도" not in user_msg
+    assert "시작점" not in user_msg
 
 
 def test_quick_responder_node_does_not_override_explicit_crop_with_target_course():

@@ -44,6 +44,26 @@ def test_generate_report_node_returns_early_apology_when_no_chunks():
     assert result["docent_answer"] == result["final_response"]
 
 
+def test_generate_report_node_surfaces_specific_hard_constraint_reason_instead_of_substituting():
+    """사용자 요청: 지정한 코스가 하드 제약(휠체어 등)을 만족 못 하면 다른 코스로 조용히
+    대체 추천하지 말고, 왜 기획서를 작성할 수 없는지 구체적인 이유만 답하고 종료해야 함.
+    retrieve_rag_node 가 이 경우 chunks=[] 와 함께 구체적인 fallback_reason 을 남기므로,
+    그 사유를 일반 "찾을 수 없었습니다" 문구 대신 그대로 노출해야 함."""
+    state = _base_state(
+        retrieved_chunks=[],
+        fallback_applied=True,
+        fallback_reason="'2코스'에는 휠체어로 이용 가능한 구간이 없습니다.",
+    )
+
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        result = generate_report_node(state)
+
+    mock_llm.assert_not_called()
+    assert "2코스" in result["final_response"]
+    assert "휠체어" in result["final_response"]
+    assert "찾을 수 없었습니다" not in result["final_response"]
+
+
 def test_generate_report_node_produces_all_five_sections_in_one_call():
     """docent_generator(섹션 1·2)와 report_finalizer(섹션 3·4·5)가 하나로 통합됐으므로,
     generate_report_node 한 번 호출로 5개 섹션이 모두 포함된 완성된 기획서가 나와야 한다."""

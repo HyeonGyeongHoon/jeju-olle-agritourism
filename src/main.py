@@ -142,6 +142,9 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
         "intent_category": None,
         "target_course": None,
         "b2b_params": None,
+        # quick_responder_node 가 target_course 로 조회해 채우고 tool_agent_node 가 최종 답변의
+        # 근거로 재사용합니다(코스 실측 거리/소요시간/난이도).
+        "course_meta": None,
         "weather_info": None,
         "safety_check": None,
         "retrieved_chunks": [],
