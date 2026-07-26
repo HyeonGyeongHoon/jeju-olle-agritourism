@@ -1,4 +1,4 @@
-from src.agent.nodes import _search_local_culture_docs, _title_keywords
+from src.services.db_service import _search_local_culture_docs, _title_keywords
 
 
 def test_title_keywords_strips_trailing_particles():

@@ -2,7 +2,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.agent import nodes
-from src.agent.nodes import _fetch_course_meta_by_name, quick_responder_node
+from src.agent.nodes import quick_responder_node
+from src.services import db_service
+from src.services.db_service import _fetch_course_meta_by_name
+
+# 패치 대상 모듈 선택 기준(2026-07-26 DB 헬퍼 서비스 레이어 분리):
+# _get_olle_relevant_admin_dongs 는 db_service 에 패치해야 합니다.
+# quick_responder_node 가 이 함수를 직접 부르지 않고, 같은 모듈 안의
+# _resolve_stats_region_from_areas 를 통해 간접적으로만 쓰기 때문에
+# nodes 네임스페이스에 패치해도 그 내부 호출은 가로채지지 않습니다.
+# 반대로 노드 본문이 직접 부르는 _search_culture_knowledge /
+# _fetch_market_insight / _fetch_course_meta_by_name 은 예전처럼
+# nodes 에 패치하는 것이 맞습니다.
 
 
 def _base_state(**b2b_overrides):
@@ -223,7 +234,7 @@ def test_quick_responder_node_scopes_search_by_target_course_when_crop_and_locat
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta) as mock_fetch_course, \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "표선면"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "표선면"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=culture_chunks) as mock_search_culture, \
          patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
          patch.object(nodes, "get_chat_completion", return_value="1코스는 감귤로 유명합니다.") as mock_llm:
@@ -252,7 +263,7 @@ def test_quick_responder_node_replaces_course_name_location_with_real_region():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
          patch.object(nodes, "get_chat_completion", return_value="1코스는..."):
@@ -292,7 +303,7 @@ def test_quick_responder_node_clears_course_name_location_when_region_unresolvab
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
          patch.object(nodes, "get_chat_completion", return_value="9코스는..."):
@@ -312,7 +323,7 @@ def test_quick_responder_node_keeps_real_region_location_untouched():
          patch.object(nodes, "_fetch_course_meta_by_name",
                       return_value={"course_name": "1코스", "crops": "감귤",
                                     "administrative_areas": "시흥리"}), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
          patch.object(nodes, "get_chat_completion", return_value="답변"):
@@ -347,7 +358,7 @@ def test_quick_responder_node_puts_course_metrics_into_prompt():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=_COURSE_7_META), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"대천동"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"대천동"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None), \
          patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km로...") as mock_llm:
@@ -374,7 +385,9 @@ def test_quick_responder_node_answers_from_course_meta_without_culture_or_market
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=_COURSE_7_META), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value=set()), \
+         patch.object(
+             db_service, "_get_olle_relevant_admin_dongs", return_value=set()
+         ), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None), \
          patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km입니다.") as mock_llm:
@@ -428,7 +441,7 @@ def test_quick_responder_node_omits_missing_course_metric_fields():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
-         patch.object(nodes, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
+         patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
          patch.object(nodes, "_fetch_market_insight", return_value=None), \
          patch.object(nodes, "get_chat_completion", return_value="답변") as mock_llm:

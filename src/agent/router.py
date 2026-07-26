@@ -2,12 +2,13 @@ import json
 import re
 
 from src.agent.llm_client import get_chat_completion
+from src.agent.prompts.loader import load_prompt
 from src.models.schema import IntentCategory, RouterResult
 
 # --- 1단계: 규칙 기반 사전 필터 (LLM 호출 없이 즉시 분류) ---
 # 단순 인사말/짧은 단답형 발화나 부적절한 표현, 그리고 "기획서 생성"이 아니라 단순 코스
 # "추천"만 요청하는 질의(막연한 추천이면 거절, 특정 코스를 지목한 의견 문의면
-# course_info)는 LLM에게 물어볼 필요 없이(비용/지연 절감) 또는 LLM 분류가 흔들리는 경계
+# info_lookup)는 LLM에게 물어볼 필요 없이(비용/지연 절감) 또는 LLM 분류가 흔들리는 경계
 # 사례이므로, 규칙으로 먼저 확정합니다. 여기서 걸러지지 않은 나머지 비정형 자연어만
 # 2단계 LLM 문맥 분류로 넘어갑니다.
 
@@ -25,11 +26,14 @@ _COURSE_REFERENCE_KEYWORDS = ("코스", "올레")
 
 # 위 거절 규칙의 예외 — 이미 특정 코스를 지목한 상태에서 그 코스에 대한 의견/적합성을
 # 묻는 질의(예: "1코스 괜찮을지 추천해줄래?")는 "아무 코스나 추천해달라"는 요청과 성격이
-# 다르며, 오히려 course_info 입니다. 이 부류는 거절하지도 기획서 파이프라인으로 보내지도
-# 않고 규칙으로 course_info 로 확정합니다(2026-07-25 추가 — 1차로는 "규칙에서 제외해
+# 다르며, 오히려 info_lookup 입니다. 이 부류는 거절하지도 기획서 파이프라인으로 보내지도
+# 않고 규칙으로 info_lookup 로 확정합니다(2026-07-25 추가 — 1차로는 "규칙에서 제외해
 # LLM에게 넘기는" 방식이었지만, 라이브 QA에서 LLM이 "추천"이라는 단어에 끌려 3회 모두
 # course_recommendation 으로 분류해 의견 질문에 5섹션 기획서를 생성하는 문제가
-# 결정론적으로 재현되어, SYSTEM_PROMPT 보완과 함께 규칙으로도 확정하게 했습니다).
+# 결정론적으로 재현되어, SYSTEM_PROMPT 보완과 함께 규칙으로도 확정하게 했습니다. 2026-07-26:
+# 사전 분류 카테고리를 course_recommendation/other/info_lookup 3개로 통합하며 이 규칙이
+# 반환하던 옛 course_info 값도 info_lookup 으로 흡수했습니다 — 다운스트림은 애초에
+# OTHER/COURSE_RECOMMENDATION 만 구분했으므로 동작은 동일합니다).
 # 실제 course_name 값은 전부 "1코스"/"1-1코스"/"3-A코스"/"10-1코스" 형태(숫자 + 선택적
 # 하이픈+숫자/영문자 + "코스")이므로, 특정 코스명을 하드코딩하지 않고 이 표기 패턴으로
 # 판별합니다. "1번 코스"/"10-1 코스"처럼 공백이나 "번"이 끼는 구어 표기도 허용합니다.
@@ -44,7 +48,7 @@ _COURSE_EXCLUSION_MARKERS = (
 _COURSE_EXCLUSION_LOOKAHEAD = 8
 
 # 규칙 기반 1단계가 확정한 분류의 사유 문구. 대부분은 서비스 범위 밖(OTHER) 판정이지만
-# specific_course_opinion 은 범위 밖이 아니라 course_info 확정 사유입니다.
+# specific_course_opinion 은 범위 밖이 아니라 info_lookup 확정 사유입니다.
 _RULE_BASED_REASON = {
     "greeting": "규칙 기반 1단계: 단순 인사말/짧은 응대 발화",
     "profanity": "규칙 기반 1단계: 부적절한 표현 감지",
@@ -99,7 +103,7 @@ def _rule_based_precheck(query: str) -> RouterResult | None:
     has_recommend_ask = "추천" in stripped
     has_proposal_ask = any(kw in stripped for kw in _PROPOSAL_KEYWORDS)
     # 특정 코스를 이미 지목한 질의는 "막연한 코스 추천 요청"이 아니므로 거절하지
-    # 않습니다(아래 3번에서 course_info 로 확정).
+    # 않습니다(아래 3번에서 info_lookup 로 확정).
     specific_course = _extract_specific_course(stripped)
     is_plain_course_recommendation = (
         has_course_ref
@@ -144,14 +148,15 @@ def _rule_based_precheck(query: str) -> RouterResult | None:
         )
 
     # 3) 이미 지목한 특정 코스에 대한 의견/적합성 문의("N코스 괜찮을지 추천해줄래?") —
-    # 결과물 생성 요청이 아니므로 기획서 파이프라인이 아니라 course_info 로 확정합니다.
+    # 결과물 생성 요청이 아니므로 기획서 파이프라인이 아니라 info_lookup 로 확정합니다.
     # LLM 은 이 부류를 "추천"이라는 단어 때문에 course_recommendation 으로 오분류하는
     # 것이 라이브에서 결정론적으로 재현되었으므로(3회 반복 동일), 여기서 확정합니다.
-    # target_course 도 정규식으로 이미 알고 있으니 함께 채워 다운스트림
-    # (_fetch_course_meta_by_name / _filter_course_ids_by_target_course)이 쓰게 합니다.
+    # target_course 는 카테고리와 무관하게 코스가 지목되면 채운다는 원칙에 따라, 정규식으로
+    # 이미 알고 있으니 함께 채워 다운스트림(_fetch_course_meta_by_name /
+    # _filter_course_ids_by_target_course)이 쓰게 합니다.
     if specific_course and has_recommend_ask and not has_proposal_ask:
         return RouterResult(
-            category=IntentCategory.COURSE_INFO,
+            category=IntentCategory.INFO_LOOKUP,
             target_course=specific_course,
             reason=_RULE_BASED_REASON["specific_course_opinion"],
         )
@@ -164,44 +169,6 @@ def _rule_based_precheck(query: str) -> RouterResult | None:
         )
 
     return None
-
-
-SYSTEM_PROMPT = """당신은 제주올레 영농-관광 B2B 기획서 도슨트에 들어온 자연어 질의를 분석하여 의도를 5가지 카테고리 중 하나로 정확히 분류하는 사전 라우터입니다.
-
-[카테고리 분기 지침]
-1. "course_info": 질의에 특정 올레길 코스("1코스", "10-1코스", "3-A코스" 등)가 이미 지목되어 있고,
-   그 코스에 대해 묻는 질문. 다음 두 종류 모두 포함합니다.
-   1-a) 구체적인 메타데이터(거리, 난이도, 소요시간, 시작/종점, 스탬프 위치 등) 조회
-        (예: "1코스 길이나 소요시간이 어떻게 돼?", "7코스 시작점이 어디야?", "10-1코스 난이도 알려줘")
-   1-b) 지목된 그 코스에 대한 의견·평가·적합성 문의. **질의에 "추천"이라는 단어가 들어 있어도,
-        새로 코스를 골라달라는 요청이 아니라 이미 지목한 그 코스가 괜찮은지/특정 대상에게
-        적합한지를 묻는 것이면 2번이 아니라 이 카테고리입니다.**
-        (예: "1코스 괜찮을지 추천해줄래?", "1코스 가볼 만한지 추천 좀 해줘",
-         "7코스 초보자한테 추천할 만해?", "9코스 아이랑 가도 될까?", "12코스 어때?")
-2. "course_recommendation": 방문 시기/매개 작물·테마/지역/제약 조건에 맞는 코스 기반 B2B 상품 기획서 "생성"을 요청하는 질문
-   (예: "10월 감귤 테마로 구좌읍 코스 기획서 만들어줘", "휠체어 이용객도 참여 가능한 코스로 상품 기획해줘", "밭담문화를 살린 동부 코스 기획안 필요해")
-   판별 기준: "기획서/기획안/상품화"처럼 **결과물을 만들어달라는 요청**이 있어야 합니다.
-   특정 코스가 지목되어 있어도 결과물 생성 요청이면 2번이고(예: "1코스로 기획서 만들어줘"),
-   결과물 생성 요청 없이 그 코스에 대한 의견만 묻는다면 1번입니다.
-3. "olle_general_info": 제주올레길 전반의 준비물, 패스포트/스탬프 운영, 안전 수칙 등 기획서 부속 안내자료에 참고할 일반 정보 질문
-   (예: "올레길 준비물 뭐가 있어?", "패스포트/스탬프는 어떻게 운영되나요?", "여름철 올레길 안전 수칙 알려줘")
-4. "other": 제주 올레길 영농-관광 상품 기획과 직접적 관련이 없는 질문
-   (예: "오늘 서울 날씨 알려줘", "안녕")
-5. "info_lookup": 기획서/상품 "생성"을 요청하는 게 아니라, 기획서 작성에 참고하기 위해 제주 문화·작물 지식이나
-   관광 방문객 통계 "정보 자체"를 가볍게 물어보는 질문. 코스 기획안이나 상품화 결과물을 만들어달라는 요청이면
-   2번(course_recommendation)이고, 단순히 알고 싶은 질문이면 이 카테고리입니다.
-   (예: "제주 밭담문화가 뭐야?", "감귤 수확 시기가 언제야?", "요즘 구좌읍 외국인 방문객 통계 어때?",
-   "2030 방문객 비중이 높은 동네가 어디야?", "마늘 파종 시기 알려줘")
-
-[응답 포맷 (JSON 전용)]
-{
-  "category": "course_info" | "course_recommendation" | "olle_general_info" | "other" | "info_lookup",
-  "target_course": "1코스" 또는 null,
-  "reason": "의도 분류 사유"
-}
-
-target_course 는 질의에 코스가 지목되어 있으면 카테고리와 무관하게 반드시 채우고
-("1코스"/"10-1코스"/"3-A코스"처럼 DB 표기 형식으로), 지목된 코스가 없을 때만 null 로 두세요."""
 
 
 def _strip_markdown_code_fence(text: str) -> str:
@@ -231,7 +198,7 @@ def route_intent(query: str) -> RouterResult:
     fallback_course = _extract_specific_course(query)
 
     try:
-        raw_response = get_chat_completion(SYSTEM_PROMPT, query)
+        raw_response = get_chat_completion(load_prompt("router.md"), query)
         cleaned_response = _strip_markdown_code_fence(raw_response)
         data = json.loads(cleaned_response)
 

@@ -21,11 +21,9 @@ class MarketLocationMetric(str, Enum):
 class IntentCategory(str, Enum):
     """사전 의도 라우팅(Stage 0) 분류 카테고리입니다."""
 
-    COURSE_INFO = "course_info"
     COURSE_RECOMMENDATION = "course_recommendation"
-    OLLE_GENERAL_INFO = "olle_general_info"
-    OTHER = "other"
     INFO_LOOKUP = "info_lookup"
+    OTHER = "other"
 
 
 class RouterResult(BaseModel):

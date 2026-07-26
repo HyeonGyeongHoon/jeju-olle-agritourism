@@ -18,9 +18,8 @@ from src.agent.nodes import (
 
 def route_after_location_resolve(state: AgentState) -> str:
     """의도 분류 결과가 course_recommendation 일 때만 코스 기획서 전체 파이프라인
-    (safety_evaluator 이후)으로 진행하고, 그 외 의도(info_lookup / course_info /
-    olle_general_info / other)는 모두 가벼운 정보 조회 파이프라인으로 분기합니다.
-    course_info / olle_general_info / other 는 기획서 생성 목적이 없으므로
+    (safety_evaluator 이후)으로 진행하고, 그 외 의도(info_lookup / other)는 모두 가벼운
+    정보 조회 파이프라인으로 분기합니다. info_lookup / other 는 기획서 생성 목적이 없으므로
     무거운 full pipeline을 우회하여 quick_responder 로 처리합니다."""
     if state.get("intent_category") == IntentCategory.COURSE_RECOMMENDATION.value:
         return "full_pipeline"
@@ -51,9 +50,9 @@ def route_after_rewrite(state: AgentState) -> str:
     """품질 검증 실패로 쿼리를 재작성한 뒤 되돌아갈 노드를, 진입했던 경로(quick_responder vs 코스
     기획서 파이프라인)에 맞춰 그대로 유지합니다. route_after_location_resolve 와 동일하게
     "course_recommendation 이 아니면 quick_responder 경로"를 기준으로 판단합니다 — 예전에는
-    info_lookup 하나만 특별 취급해서, course_info/olle_general_info/other 로 분류돼
-    quick_responder 로 들어간 요청이 재작성 후 엉뚱하게 retriever(코스 검색)로 잘못 돌아가는
-    비일관성이 있었습니다(2026-07-24 발견 및 수정)."""
+    info_lookup 하나만 특별 취급해서, other 로 분류돼 quick_responder 로 들어간 요청이
+    재작성 후 엉뚱하게 retriever(코스 검색)로 잘못 돌아가는 비일관성이 있었습니다
+    (2026-07-24 발견 및 수정)."""
     if state.get("intent_category") != IntentCategory.COURSE_RECOMMENDATION.value:
         return "quick_response"
     return "retrieve"
@@ -80,8 +79,8 @@ def should_continue(state: AgentState) -> str:
     # 2. 하이브리드 교정 라우팅
     # quick_responder 경로(course_recommendation 이 아닌 4개 의도 전부 — route_after_location_resolve
     # 와 동일한 기준)에서 1차 실패(loop_count < 2)인 경우 쿼리 재작성 없이 tool_agent 로 직행합니다.
-    # 예전에는 info_lookup 하나만 이 취급을 받아, course_info/olle_general_info/other 로 들어온
-    # 요청은 direct_retry 없이 곧장 rewrite 로 가버리는 비일관성이 있었습니다(2026-07-24 수정).
+    # 예전에는 info_lookup 하나만 이 취급을 받아, other 로 들어온 요청은 direct_retry 없이
+    # 곧장 rewrite 로 가버리는 비일관성이 있었습니다(2026-07-24 수정).
     if intent != IntentCategory.COURSE_RECOMMENDATION.value and loop_count < 2:
         print(f"[-] [하이브리드 교정 1차] 수치/단위 교정을 위해 tool_agent 로 직행합니다. (현재 루프: {loop_count})")
         return "direct_retry"

@@ -3,7 +3,8 @@ import time
 from unittest.mock import patch
 
 from src.agent import nodes
-from src.agent.nodes import _build_price_breakdown_str, _estimate_price_range, generate_report_node
+from src.agent.nodes import generate_report_node
+from src.services.price_estimation_service import _build_price_breakdown_str, _estimate_price_range
 
 
 def _base_state(**overrides):

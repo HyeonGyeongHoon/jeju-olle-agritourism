@@ -210,12 +210,12 @@ def test_hybrid_correction_routing():
 
 def test_hybrid_correction_routing_applies_to_all_non_recommendation_intents():
     """회귀 방지: should_continue 는 예전엔 info_lookup 만 direct_retry 대상으로 취급했는데,
-    quick_responder 로 들어가는 나머지 의도(course_info/olle_general_info/other)는 direct_retry
-    없이 곧장 rewrite 로 가버리는 비일관성이 있었습니다(2026-07-24 발견 및 수정 —
-    route_after_location_resolve 와 동일하게 "course_recommendation 이 아니면" 기준으로 통일)."""
+    quick_responder 로 들어가는 나머지 의도(other, 당시엔 course_info/olle_general_info 도
+    별도 값이었음)는 direct_retry 없이 곧장 rewrite 로 가버리는 비일관성이 있었습니다
+    (2026-07-24 발견 및 수정 — route_after_location_resolve 와 동일하게
+    "course_recommendation 이 아니면" 기준으로 통일). 2026-07-26: course_info/olle_general_info
+    는 info_lookup 으로 통합됨."""
     for category in (
-        IntentCategory.COURSE_INFO,
-        IntentCategory.OLLE_GENERAL_INFO,
         IntentCategory.OTHER,
         IntentCategory.INFO_LOOKUP,
     ):

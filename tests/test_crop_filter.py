@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
-from src.agent.nodes import _filter_course_ids_by_crop, _get_known_crop_tags
+from src.agent.nodes import _filter_course_ids_by_crop
+from src.services.db_service import _get_known_crop_tags
 
 
 def _make_client(all_crops_rows, filtered_rows):

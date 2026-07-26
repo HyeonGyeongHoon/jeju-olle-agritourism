@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
-from src.agent import nodes
-from src.agent.nodes import _search_culture_knowledge
+from src.services import db_service
+from src.services.db_service import _search_culture_knowledge
 
 
 def _rpc_client(rows, known_crops=()):
@@ -28,8 +28,8 @@ def test_filters_out_documents_tagged_with_a_different_crop():
         known_crops=["당근", "마늘"],
     )
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
-         patch.object(nodes, "_search_local_culture_docs", return_value=[]) as mock_local:
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(db_service, "_search_local_culture_docs", return_value=[]) as mock_local:
         result = _search_culture_knowledge(client, "당근", "당근")
 
     assert result == []
@@ -43,7 +43,7 @@ def test_keeps_documents_matching_the_requested_crop():
         known_crops=["당근"],
     )
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]):
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]):
         result = _search_culture_knowledge(client, "당근", "당근")
 
     assert len(result) == 1
@@ -63,8 +63,8 @@ def test_excludes_general_documents_when_the_requested_item_is_a_real_crop():
         known_crops=["당근", "마늘"],
     )
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
-         patch.object(nodes, "_search_local_culture_docs", return_value=[]) as mock_local:
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(db_service, "_search_local_culture_docs", return_value=[]) as mock_local:
         result = _search_culture_knowledge(client, "당근", "당근")
 
     assert result == []
@@ -85,7 +85,7 @@ def test_keeps_general_documents_when_the_requested_item_is_a_non_crop_theme():
         known_crops=["마늘"],  # "밭담"은 known_crops 에 없음 -> 작물이 아닌 테마어로 판정됨
     )
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]):
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]):
         result = _search_culture_knowledge(client, "밭담", "밭담")
 
     titles = [r["title"] for r in result]
@@ -101,7 +101,7 @@ def test_no_filtering_applied_when_key_item_or_crop_is_absent():
          "target_crop": "감귤"},
     ])
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]):
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]):
         result = _search_culture_knowledge(client, None, "제주 작물 이야기")
 
     assert len(result) == 2
@@ -115,8 +115,8 @@ def test_falls_back_to_local_docs_when_all_rpc_results_are_wrong_crop():
     )
     local_fallback_result = [{"title": "당근 재배(로컬)", "crop_name": "당근"}]
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
-         patch.object(nodes, "_search_local_culture_docs", return_value=local_fallback_result) as mock_local:
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(db_service, "_search_local_culture_docs", return_value=local_fallback_result) as mock_local:
         result = _search_culture_knowledge(client, "당근", "당근")
 
     assert result == local_fallback_result
@@ -131,8 +131,8 @@ def test_falls_back_to_local_docs_when_rpc_call_itself_raises(monkeypatch):
     client.rpc.side_effect = Exception("connection refused")
     local_fallback_result = [{"title": "당근 재배(로컬)", "crop_name": "당근"}]
 
-    with patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
-         patch.object(nodes, "_search_local_culture_docs", return_value=local_fallback_result) as mock_local:
+    with patch.object(db_service, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(db_service, "_search_local_culture_docs", return_value=local_fallback_result) as mock_local:
         result = _search_culture_knowledge(client, "당근", "당근")
 
     assert result == local_fallback_result

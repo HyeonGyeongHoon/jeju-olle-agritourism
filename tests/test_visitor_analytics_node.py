@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from src.agent.nodes import _fetch_market_insight
+from src.services.db_service import _fetch_market_insight
 
 
 def _chain(mock_client):

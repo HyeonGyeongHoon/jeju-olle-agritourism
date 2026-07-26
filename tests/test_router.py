@@ -80,7 +80,7 @@ def test_route_intent_does_not_decline_query_without_recommend_word(monkeypatch)
         ("3-a코스 추천해줄래?", "3-A코스"),
     ],
 )
-def test_route_intent_classifies_opinion_about_specific_course_as_course_info(
+def test_route_intent_classifies_opinion_about_specific_course_as_info_lookup(
     monkeypatch, query, expected_course
 ):
     """회귀 방지 2단(2026-07-25 라이브 QA):
@@ -89,21 +89,22 @@ def test_route_intent_classifies_opinion_about_specific_course_as_course_info(
         거절했습니다.
     (2) 그 거절만 풀고 LLM 에 맡겼더니, LLM 이 "추천"이라는 단어에 끌려 3회 반복 모두
         course_recommendation 으로 분류해 의견 질문에 5섹션 기획서를 생성했습니다.
-    따라서 이 부류는 규칙으로 course_info 로 확정하고, LLM 이 자주 비워 보내던
-    target_course 까지 정규식으로 채워야 합니다."""
+    따라서 이 부류는 규칙으로 info_lookup 으로 확정하고(2026-07-26: 옛 course_info 값이
+    info_lookup 으로 통합됨), LLM 이 자주 비워 보내던 target_course 까지 정규식으로
+    채워야 합니다."""
     mock_llm = MagicMock()
     monkeypatch.setattr(router, "get_chat_completion", mock_llm)
 
     result = router.route_intent(query)
 
     mock_llm.assert_not_called()
-    assert result.category == IntentCategory.COURSE_INFO
+    assert result.category == IntentCategory.INFO_LOOKUP
     assert result.target_course == expected_course
     assert "규칙 기반" in result.reason
 
 
 def test_route_intent_specific_course_opinion_is_not_out_of_scope_reason(monkeypatch):
-    """규칙이 course_info 로 확정할 때 "단순 코스 추천 요청"(거절) 사유 문구를 쓰면
+    """규칙이 info_lookup 으로 확정할 때 "단순 코스 추천 요청"(거절) 사유 문구를 쓰면
     로그/QA 에서 거절로 오독되므로, 서로 다른 사유 문구여야 합니다."""
     monkeypatch.setattr(router, "get_chat_completion", MagicMock())
 
@@ -295,7 +296,7 @@ def test_route_intent_fills_target_course_when_llm_returns_null(monkeypatch):
     target_course=None 을 반환해, 다운스트림에서 코스를 특정하지 못했습니다. LLM 이
     비워 보내도 질의의 "N코스" 표기로 채워야 합니다."""
     fake_response = """{
-        "category": "course_info",
+        "category": "info_lookup",
         "target_course": null,
         "reason": "7코스 스탬프 위치 문의"
     }"""
@@ -305,14 +306,14 @@ def test_route_intent_fills_target_course_when_llm_returns_null(monkeypatch):
 
     result = router.route_intent("7코스 스탬프 위치가 어디야?")
 
-    assert result.category == IntentCategory.COURSE_INFO
+    assert result.category == IntentCategory.INFO_LOOKUP
     assert result.target_course == "7코스"
 
 
 def test_route_intent_prefers_llm_target_course_over_regex_fallback(monkeypatch):
     """폴백은 LLM 이 값을 주지 않았을 때만 쓰여야 합니다(LLM 값을 덮어쓰면 안 됨)."""
     fake_response = """{
-        "category": "course_info",
+        "category": "info_lookup",
         "target_course": "10-1코스",
         "reason": "가파도 코스 문의"
     }"""
@@ -376,9 +377,11 @@ def test_route_intent_handles_profanity_without_llm_call(monkeypatch):
 
 # --- 2단계 LLM 문맥 분류 ---
 
-def test_route_intent_course_info(monkeypatch):
+def test_route_intent_info_lookup_course_metadata(monkeypatch):
+    """옛 course_info 카테고리(코스 메타데이터 조회)가 2026-07-26 통합 후에도
+    info_lookup 으로 정상 분류되고 target_course 가 채워져야 합니다."""
     fake_response = """{
-        "category": "course_info",
+        "category": "info_lookup",
         "target_course": "1코스",
         "reason": "1코스 소요시간 문의"
     }"""
@@ -387,7 +390,7 @@ def test_route_intent_course_info(monkeypatch):
     )
 
     result = router.route_intent("1코스 총 소요시간이 얼마나 돼?")
-    assert result.category == IntentCategory.COURSE_INFO
+    assert result.category == IntentCategory.INFO_LOOKUP
     assert result.target_course == "1코스"
 
 
@@ -406,9 +409,11 @@ def test_route_intent_course_recommendation(monkeypatch):
     assert result.target_course is None
 
 
-def test_route_intent_olle_general_info(monkeypatch):
+def test_route_intent_info_lookup_general_info(monkeypatch):
+    """옛 olle_general_info 카테고리(올레길 일반 정보 안내)가 2026-07-26 통합 후에도
+    info_lookup 으로 정상 분류되어야 합니다."""
     fake_response = """{
-        "category": "olle_general_info",
+        "category": "info_lookup",
         "target_course": null,
         "reason": "올레길 준비물 안내 질문"
     }"""
@@ -417,7 +422,7 @@ def test_route_intent_olle_general_info(monkeypatch):
     )
 
     result = router.route_intent("올레길 탐방할 때 필수 준비물이 뭐야?")
-    assert result.category == IntentCategory.OLLE_GENERAL_INFO
+    assert result.category == IntentCategory.INFO_LOOKUP
 
 
 def test_route_intent_other(monkeypatch):
@@ -452,7 +457,7 @@ def test_route_intent_info_lookup(monkeypatch):
 def test_route_intent_strips_markdown_code_fence(monkeypatch):
     fenced_response = """```json
     {
-        "category": "course_info",
+        "category": "info_lookup",
         "target_course": "7코스",
         "reason": "7코스 난이도 문의"
     }
@@ -462,7 +467,7 @@ def test_route_intent_strips_markdown_code_fence(monkeypatch):
     )
 
     result = router.route_intent("7코스 난이도는 어떤가요?")
-    assert result.category == IntentCategory.COURSE_INFO
+    assert result.category == IntentCategory.INFO_LOOKUP
     assert result.target_course == "7코스"
 
 

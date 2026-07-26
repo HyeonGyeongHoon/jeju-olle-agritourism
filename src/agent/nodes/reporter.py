@@ -1,0 +1,644 @@
+"""기획서 작성(report_generator)과 정보성 답변(quick_responder) 노드,
+그리고 이 두 노드 전용 프롬프트 컨텍스트 조립 헬퍼.
+
+(2026-07-26 nodes.py 분할 — 로직 변경 없는 순수 코드 이동)
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+from typing import Any, Dict, List
+
+from src.agent.prompts.loader import load_prompt
+from src.agent.state import AgentState
+from src.models.schema import IntentCategory
+
+# --- 로컬 임포트 규약 (2026-07-26 분할 시 도입, 반드시 유지) ---
+# 이 모듈의 노드 함수들은 필요한 헬퍼/클라이언트를 모듈 상단이 아니라 **함수 본문 안에서**
+# `from src.agent.nodes import ...` 로 가져옵니다. 분할 이전 nodes.py 에서는 이 이름들이
+# 전부 한 모듈의 전역이었기 때문에 테스트가 `patch.object(nodes, "X")` 로 목킹할 수 있었고,
+# 그 계약을 그대로 유지하려면 호출 시점에 nodes 패키지 네임스페이스에서 이름을 해석해야
+# 합니다(모듈 상단에서 원본 모듈로부터 직접 import 하면 그 목이 가로채지 못함 —
+# CLAUDE.md 의 db_service 이관 당시 테스트 7건이 깨진 것과 동일한 함정).
+# 동시에 서브모듈 간 상호 참조(reporter <-> quality 등)의 순환 임포트도 함께 해소합니다.
+
+
+_MARKET_METRIC_LABELS = {
+    "total_visitors": "총 방문객 수",
+    "yoy_growth_rate": "전년 대비 증감률",
+    "female_ratio": "여성 방문객 비중",
+    "male_ratio": "남성 방문객 비중",
+    "youth_10s_ratio": "10대 이하 비중",
+    "young_2030_ratio": "2030대 비중",
+    "middle_4060_ratio": "40~60대 비중",
+    "senior_70s_ratio": "70대 이상 비중",
+    "foreign_visitors": "외국인 방문객 수",
+}
+
+
+# 코스 의견/적합성 답변에 인용할 실측 수치의 표시 라벨 (컬럼 → 라벨, 단위)
+_COURSE_META_DISPLAY_FIELDS = (
+    ("total_distance_km", "총 거리", "km"),
+    ("estimated_time_hours", "예상 소요시간", "시간"),
+    ("estimated_time_text", "소요시간 안내", ""),
+    ("difficulty", "난이도", ""),
+    ("start_point", "시작점", ""),
+    ("end_point", "종점", ""),
+)
+
+
+def _build_course_meta_context_str(course_meta: Dict[str, Any] | None) -> str:
+    """코스 메타데이터를 LLM 프롬프트에 넣을 "라벨: 값" 목록 문자열로 만듭니다. 값이 없는
+    필드는 아예 넣지 않아, LLM 이 빈 값을 보고 추측으로 메우지 않도록 합니다.
+    """
+    if not course_meta:
+        return ""
+    lines = []
+    for column, label, unit in _COURSE_META_DISPLAY_FIELDS:
+        value = course_meta.get(column)
+        if value in (None, ""):
+            continue
+        lines.append(f"- {label}: {value}{unit}")
+    crops = (course_meta.get("crops") or "").strip()
+    if crops:
+        lines.append(f"- 대표 재배 작물: {crops}")
+    areas = (course_meta.get("administrative_areas") or "").strip()
+    if areas:
+        lines.append(f"- 경유 행정구역: {areas}")
+    return "\n".join(lines)
+
+
+def _build_culture_context_str(culture_chunks: List[Dict[str, Any]], target_month: int) -> str:
+    """밭담문화·작물 생육 지식 컨텍스트 문자열을 만듭니다. crop_seven_docs.json 계열 문서
+    (target_crop/region_tag/active_months/season_stage 보유)는 방문 예정월과 활동월을 대조해
+    제철 여부를 함께 명시함으로써, LLM 이 제철이 아닌 작물을 "지금 한창"인 것처럼 서술하지
+    않도록 합니다. 나머지 문서(신규 필드 없음)는 title/content만 표기. generate_report_node와
+    quick_responder_node가 공통으로 사용합니다.
+    """
+    culture_context_str = ""
+    for i, cc in enumerate(culture_chunks):
+        meta_parts = []
+        crop_label = cc.get("target_crop") or cc.get("crop_name")
+        if crop_label:
+            meta_parts.append(f"작물: {crop_label}")
+        if cc.get("region_tag"):
+            meta_parts.append(f"주산지: {cc['region_tag']}")
+        if cc.get("season_stage"):
+            meta_parts.append(f"생육 단계: {cc['season_stage']}")
+        active_months = cc.get("active_months")
+        if active_months:
+            in_season = target_month in active_months
+            months_str = ",".join(str(m) for m in sorted(active_months))
+            meta_parts.append(
+                f"활동월: {months_str}월 (방문 예정월 {target_month}월 기준 "
+                f"{'제철 - 실제로 볼 수 있는 시기' if in_season else '제철 아님 - 다른 시기의 경관/서사로 대체 필요'})"
+            )
+        meta_str = f" [{', '.join(meta_parts)}]" if meta_parts else ""
+        culture_context_str += f"\n[문화지식 {i+1}] {cc['title']}{meta_str}:\n{cc['content']}\n"
+    return culture_context_str
+
+
+def _build_market_insight_summary_str(market_insight: Dict[str, Any] | None) -> str:
+    """관광 방문객 통계(visitor_analytics) 한 행을 사람이 읽는 요약 문자열로 변환합니다.
+    quick_responder_node와 check_quality_node(코스 청크가 없는 경로)가 공통으로 사용합니다.
+    데이터가 없으면 빈 문자열을 반환합니다.
+    """
+    if not market_insight:
+        return ""
+    parts = [
+        f"{market_insight['region_dong']} {market_insight['year_month']} "
+        f"방문객 {market_insight['total_visitors']:,}명"
+    ]
+    if market_insight.get("yoy_growth_rate") is not None:
+        parts.append(f"전년 대비 {market_insight['yoy_growth_rate']}%")
+    if market_insight.get("foreign_visitors") is not None:
+        parts.append(f"외국인 방문객 {market_insight['foreign_visitors']:,}명")
+    if market_insight.get("female_ratio") is not None:
+        parts.append(f"여성 비중 {market_insight['female_ratio']}%")
+    if market_insight.get("young_2030_ratio") is not None:
+        parts.append(f"2030 비중 {market_insight['young_2030_ratio']}%")
+    if market_insight.get("middle_4060_ratio") is not None:
+        parts.append(f"40~60대 비중 {market_insight['middle_4060_ratio']}%")
+    if market_insight.get("senior_70s_ratio") is not None:
+        parts.append(f"70대 이상 비중 {market_insight['senior_70s_ratio']}%")
+    return "📊 " + ", ".join(parts)
+
+
+_OUT_OF_SCOPE_DECLINE_MSG = (
+    "죄송하지만 이 질문에는 답변드리기 어렵습니다. 이 서비스는 방문 시기·작물·지역·테마 "
+    "조건에 맞춰 제주 올레 코스의 B2B 관광 상품 기획서를 작성해 드리는 전용 서비스로, "
+    "개별 코스 추천이나 날씨·맛집 같은 일반 정보 안내는 제공하지 않습니다. "
+    "'~코스로 기획서 만들어줘'처럼 요청해 주시면 도와드릴 수 있습니다."
+)
+
+
+def quick_responder_node(state: AgentState) -> Dict[str, Any]:
+    """기획서 생성 없이, 제주 밭담문화·작물 생육 지식과 관광 방문객 통계만 검색해 간결한 정보성
+    답변을 빠르게 제공하는 Quick Responder 노드입니다. course_recommendation 을 제외한
+    모든 의도(info_lookup/other)의 공통 경로로,
+    safety_evaluator/코스 검색/report_generator 를 전부 건너뜁니다.
+    retrieved_chunks 는 건드리지 않고 빈 상태 그대로 둡니다 — 코스 검색을 하지 않았다는 사실 자체가
+    check_quality_node 등 하류 노드에 "이 경로는 코스 기획서가 아니다"를 알리는 신호로 쓰입니다.
+    **(2026-07-25 추가)** `other`로 분류된 질의는 두 가지입니다 — 제주 올레와 아예 무관한 질문
+    (예: "서울 맛집 추천해줘")과, 제주 올레 관련이지만 기획서가 아니라 단순 코스 "추천"을
+    요청하는 질문(예: "당근 코스 추천해줘"). 이 서비스는 코스 추천 자체를 제공하지 않으므로
+    (사용자 요청: "코스 추천은 하지 않습니다"라고 명확히 예외 처리), 두 경우 모두 문화·작물
+    지식이나 통계를 검색해 대신 답하지 않고 서비스 범위를 안내한 뒤 즉시 종료합니다.
+    **(2026-07-25 추가 — 무조건 반려/Fail-Fast)** retrieve_rag_node 가 DB 매칭 0건으로 검색을
+    중단했으면(is_exit_early) route_after_retriever 가 report_generator 대신 이 노드로 제어를
+    넘깁니다. 그 경우 이 노드는 반려 사유만 그대로 최종 답변으로 돌려주고, culture_crop_knowledge/
+    visitor_analytics 조회는 한 번도 하지 않습니다 — 반려 사유와 무관한 문화·통계 내용을 덧붙이면
+    "코스는 못 찾았지만 대신 이런 정보가 있다"는 식의 사실상 대체 추천이 되고, quality_checker 가
+    그 무관한 컨텍스트와 반려 메시지를 대조하며 재작성 루프를 돌게 됩니다.
+    """
+    from src.agent.nodes import (
+        _fetch_course_meta_by_name,
+        _fetch_market_insight,
+        _looks_like_course_name,
+        _resolve_stats_region_from_areas,
+        _search_culture_knowledge,
+        get_chat_completion,
+        get_supabase_client,
+    )
+
+    if state.get("is_exit_early"):
+        reason = state.get("exit_reason") or "요청하신 조건에 맞는 코스를 찾지 못했습니다."
+        # 문구는 generate_report_node 의 `if not chunks:` 반려 분기와 동일한 형태로 통일합니다.
+        msg = f"요청하신 조건으로는 기획서를 작성할 수 없습니다. {reason}"
+        return {"docent_answer": msg, "final_response": msg}
+
+    if state.get("intent_category") == IntentCategory.OTHER.value:
+        return {
+            "culture_chunks": [],
+            "market_insight": None,
+            "docent_answer": _OUT_OF_SCOPE_DECLINE_MSG,
+            "final_response": _OUT_OF_SCOPE_DECLINE_MSG,
+        }
+
+    query = state["query"]
+    constraints = state.get("parsed_constraints") or {}
+    b2b_params = state.get("b2b_params") or {}
+    target_course = state.get("target_course")
+    key_item_or_crop = b2b_params.get("key_item_or_crop")
+    preferred_location = b2b_params.get("preferred_location")
+    target_month = b2b_params.get("target_month") or date.today().month
+    include_market_insights = b2b_params.get("include_market_insights", True)
+    location_resolution = b2b_params.get("market_location_resolution")
+    fallback_query = constraints.get("vector_query") or query
+
+    client = get_supabase_client()
+
+    # "OO코스 알려줘" 처럼 특정 코스명이 언급된 질의는, 파서가 key_item_or_crop/
+    # preferred_location 을 못 채웠어도 그 코스의 실제 작물/지역으로 검색 조건을 보완합니다
+    # (이전엔 target_course 가 아예 무시되어 코스명을 특정해도 일반 검색과 동일하게 동작했음).
+    course_meta = _fetch_course_meta_by_name(client, target_course) if target_course else None
+
+    # preferred_location 에 지역명이 아니라 코스명이 들어온 경우(intent_parser 가 실제로 그렇게
+    # 채웁니다 — 2026-07-25 라이브 QA에서 "1코스 괜찮을지 추천해줄래?" → preferred_location=
+    # '1코스' 확인)를 지역 필드로서 무효 처리합니다. 예전엔 이 값이 truthy 라는 이유만으로 아래
+    # 보완 로직을 건너뛰어, 코스명이 그대로 tool_agent 의 통계 조회 지역 인자로 전달됐고,
+    # 도구가 반환한 "조회 가능한 지역: ..." 목록을 LLM 이 그대로 "대신 이 지역들을 추천드릴 수
+    # 있어요"로 노출해 — 라우팅 규칙으로 막으려던 "다른 코스/지역 추천"이 이 경로로 재발했습니다.
+    if _looks_like_course_name(preferred_location):
+        preferred_location = None
+
+    if course_meta:
+        if not key_item_or_crop:
+            key_item_or_crop = (course_meta.get("crops") or "").split(",")[0].strip() or None
+        if not preferred_location:
+            # administrative_areas 는 법정리/법정동 단위라 visitor_analytics.region_dong
+            # (행정동/읍·면)과 계층이 달라 그대로 쓰면 통계 조회가 또 실패합니다. 통계 조회가
+            # 가능한 행정동/읍·면으로 변환해서만 채우고, 변환할 수 없으면 비워 둡니다.
+            preferred_location = _resolve_stats_region_from_areas(
+                client, course_meta.get("administrative_areas")
+            )
+
+    culture_chunks = _search_culture_knowledge(client, key_item_or_crop, fallback_query)
+
+    market_insight = None
+    if include_market_insights:
+        # target_month(위에서 today() 로 기본값 처리된 값)를 그대로 넘기지 않고 질의가 실제로
+        # 지정한 월(b2b_params 원본, 없으면 None)만 넘깁니다 — "최근 방문객 수는?"처럼 월이
+        # 없는 질의에서 "오늘 날짜의 달"을 강제하면, DB 적재 범위가 이번 달까지 아닐 때 실제로는
+        # 최근 데이터가 있는데도 조회가 0건으로 실패합니다. None 이면 _fetch_market_insight 가
+        # 월 필터 없이 해당 지역의 최신 데이터를 가져옵니다.
+        market_insight = _fetch_market_insight(client, preferred_location, b2b_params.get("target_month"))
+
+    culture_context_str = _build_culture_context_str(culture_chunks, target_month)
+    if not culture_context_str:
+        culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다.)"
+
+    market_context_str = _build_market_insight_summary_str(market_insight) or "(관련 관광 방문객 통계를 찾지 못했습니다.)"
+
+    location_note = ""
+    if location_resolution:
+        metric_label = _MARKET_METRIC_LABELS.get(
+            location_resolution.get("metric"), location_resolution.get("metric")
+        )
+        location_note = (
+            f"\n[지역 자동 선정 근거] '{location_resolution.get('region_dong')}'은 "
+            f"{location_resolution.get('year_month')} 기준 {metric_label} 1위 지역으로 자동 선정되었습니다."
+        )
+
+    # 코스가 지목된 질의는 코스명 라벨만 넘기지 않고 DB 실측치(거리/소요시간/난이도/시작·종점)를
+    # 함께 넘깁니다. 라벨만 넘겼을 때 LLM 이 "비교적 평탄해 초보자도 좋다"처럼 DB 근거 없는
+    # 추측으로 적합성을 단정하는 문제가 라이브 QA에서 확인됐습니다(2026-07-25).
+    course_note = ""
+    if target_course:
+        course_note = f"\n\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
+        course_meta_context_str = _build_course_meta_context_str(course_meta)
+        if course_meta_context_str:
+            course_note += (
+                f"\n[대상 코스 DB 실측 메타데이터]\n{course_meta_context_str}"
+            )
+        else:
+            course_note += "\n[대상 코스 DB 실측 메타데이터] (조회하지 못했습니다.)"
+
+    if culture_chunks or market_insight or course_meta:
+        system_prompt = load_prompt("quick_responder.md")
+        user_msg = (
+            f"[질문]: {query}\n\n"
+            f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
+            f"[관광 방문객 통계]:\n{market_context_str}{location_note}{course_note}"
+        )
+        answer = get_chat_completion(system_prompt, user_msg)
+    else:
+        answer = (
+            "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식이나 관광 방문객 통계를 "
+            "찾지 못했습니다. 질문을 조금 더 구체적으로 말씀해 주시면 다시 찾아보겠습니다."
+        )
+
+    # 보완/정정한 검색 조건을 state 에 다시 써서 하류 노드(tool_agent_node)가 같은 값을 보게
+    # 합니다. 이게 없으면 이 노드는 지역 오염을 로컬 변수에서만 고치고, tool_agent_node 는
+    # 여전히 state 의 b2b_params.preferred_location(='1코스')을 읽어 통계 도구를 잘못된 지역으로
+    # 호출합니다 — 상류 노드의 결정을 하류 노드가 뒤엎는 이 프로젝트의 전형적 경계면 버그입니다.
+    updated_b2b_params = {
+        **b2b_params,
+        "key_item_or_crop": key_item_or_crop,
+        "preferred_location": preferred_location,
+    }
+
+    return {
+        "b2b_params": updated_b2b_params,
+        "course_meta": course_meta,
+        "culture_chunks": culture_chunks,
+        "market_insight": market_insight,
+        "docent_answer": answer,
+        "final_response": answer,
+    }
+
+
+def generate_report_node(state: AgentState) -> Dict[str, Any]:
+    """검색된 코스 컨텍스트, 실제 세부 구간(km) 데이터, 제주 밭담문화·작물 생육 지식 DB 근거를 엮어
+    B2B 관광 상품 기획서의 [📊 B2B 상품 개요 & 스펙]/[📍 타임라인 표](섹션 1·2)를 LLM 으로 작성한 뒤,
+    이어서 비짓제주 API 기반 [☕ 로컬 상생 제휴 아이디어]/[🌤️ 기후 리스크 및 Plan B]/
+    [🛡️ Trust Tagging](섹션 3·4·5)를 같은 노드 안에서 순차적으로 완결하는 Report Generator
+    노드입니다. course_recommendation 의도(무거운 전체 파이프라인)에서만 실행되므로(그 외 의도는
+    quick_responder 로 우회) 별도 조건부 분기 없이 항상 5개 섹션 전체를 작성합니다.
+    (2026-07-24 이전에는 docent_generator/report_finalizer(당시 이름 local_recommender) 두
+    노드로 나뉘어 있었고, should_finalize_report 라우터가 intent_category==course_recommendation
+    일 때만 후자를 실행했는데, 이 조건은 route_after_location_resolve 가 애초에 course_recommendation
+    이 아니면 이 경로 자체에 진입시키지 않으므로 항상 참이었습니다 — 그래서 이 노드로 통합.)
+    관광 API 데이터는 폐업/변경에 취약해 특정 매장을 "검증된 제휴처"로 단정할 수 없으므로,
+    매장명/주소/전화번호는 결과물에 노출하지 않고 지역 상점의 성격(introduction)만 아이디어의
+    참고 재료로 사용합니다.
+    """
+    from src.agent.nodes import (
+        _SELF_RAG_STARS_PLACEHOLDER,
+        _build_price_breakdown_str,
+        _estimate_price_range,
+        _resolve_effective_crops,
+        get_chat_completion,
+        get_visit_jeju_recommendations,
+    )
+
+    query = state["query"]
+    chunks = state["retrieved_chunks"]
+    culture_chunks = state.get("culture_chunks") or []
+    sub_segments = state.get("sub_segments") or []
+    fallback = state["fallback_applied"]
+    reason = state["fallback_reason"]
+    weather = state["weather_info"] or {}
+    safety = state["safety_check"] or {}
+    market_insight = state.get("market_insight")
+    b2b_params = state.get("b2b_params") or {}
+    target_audience = b2b_params.get("target_audience") or "family"
+    include_market_insights = b2b_params.get("include_market_insights", True)
+    # 방문 예정월이 질의에 명시되지 않으면 오늘 날짜의 월을 기준으로 제철 여부를 판단합니다
+    # (safety_evaluator_node 의 기본값 처리 방식과 동일).
+    target_month = b2b_params.get("target_month") or date.today().month
+
+    if not chunks:
+        # fallback_reason 이 있으면(예: 지정한 코스가 하드 제약을 만족 못 해 retrieve_rag_node 가
+        # 대체 추천 없이 검색을 중단시킨 경우) 그 구체적인 사유를 그대로 안내합니다. 다른 코스로
+        # 조용히 대체하지 않고 "왜 기획서를 못 만드는지"만 정직하게 답하고 종료합니다(사용자 요청).
+        if fallback and reason:
+            fallback_msg = f"요청하신 조건으로는 기획서를 작성할 수 없습니다. {reason}"
+        else:
+            fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
+        return {"docent_answer": fallback_msg, "final_response": fallback_msg}
+
+    # 코스 컨텍스트 빌드. 여러 코스가 함께 검색되더라도 섹션 1·2가 실제로 상품화하는 대상은
+    # 항상 chunks[0](유사도 순위 최상위 매칭 코스 — price_range_str/course_name 등 다른 계산도
+    # 전부 chunks[0] 기준)뿐입니다. 각 코스 블록에 "이 코스의 재배작물/행정구역" 형태로 소속을
+    # 문장 단위까지 명시하고 코스 1에는 별도 역할 라벨을 붙여, LLM이 코스 2 이후의 crops를 코스
+    # 1 얘기인 것처럼 자유 연상으로 섞어 쓰지 않도록 구조적으로 고정합니다(회귀 방지: 예전엔
+    # 코스명과 crops 목록이 근접 배치만 되어 있어 상위 매칭이 아닌 다른 코스의 crops가 상품
+    # 설명에 잘못 귀속되는 사례가 실사용 중 확인됨 — 예: 최상위 매칭 15-B코스(crops=마늘)에
+    # 14코스의 crops(감귤/양배추)가 서술됨).
+    context_str = ""
+    for i, c in enumerate(chunks):
+        role_label = (
+            "★ 최상위 매칭 코스 - 이번 상품 기획서가 실제로 상품화하는 유일한 대상"
+            if i == 0
+            else "참고용 코스 (상품화 대상이 아님 - 아래 최상위 매칭 코스 서술에 이 코스의 정보를 섞지 말 것)"
+        )
+        context_str += f"\n[코스 {i+1} - {role_label}]: {c['course_name']} (거리: {c['total_distance_km']}km, 소요시간: {c['estimated_time_text']}, 난이도: {c['difficulty']})\n"
+        context_str += f"※ {c['course_name']}의 재배작물: {c['crops']} / {c['course_name']}의 경유 행정구역: {c['administrative_areas']}\n"
+        context_str += f"내용: {c['content']}\n"
+
+    # 밭담문화·작물 생육 지식 DB 컨텍스트 빌드 (외부 API 대신 문서 근거 확보)
+    culture_context_str = _build_culture_context_str(culture_chunks, target_month)
+    if not culture_context_str:
+        # 근거 문서가 없다고 지어낸 일반 지식으로 채우지 말고, 근거가 없다는 사실 자체를 있는
+        # 그대로 반영하도록 지시합니다(사용자 요청: 관련 정보가 없으면 솔직하게 답할 것).
+        culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다. 지어내지 말고, 이 지점은 문화/작물 근거 없이 코스 사실 정보 위주로만 서술하세요.)"
+
+    # 실제 세부 구간(구간명 + 누적 km) 컨텍스트 빌드 - 타임라인 표의 유일한 사실 근거
+    if sub_segments:
+        segments_str = "\n".join(f"- {s['sub_segment_name']} ({s['distance_km']}km)" for s in sub_segments)
+    else:
+        segments_str = "(세부 구간 데이터 없음 - 타임라인 표는 Start/Finish 위주로 간략히 구성)"
+
+    # 제주관광공사 방문객 빅데이터(Market Insight) 컨텍스트 빌드 - 섹션 1 하단에 필수 기재
+    # 타겟 고객층에 따라 강조할 지표를 코드에서 결정해 지시문으로 넘김 (LLM이 임의로 고르지 않도록).
+    # 단, 그 행정동/월에 원본 순위표 데이터가 없어 실제로는 None인 지표를 "두드러진다"는 식으로
+    # 단정하지 않도록, 강조 후보는 market_insight 에 실제로 값이 있는 지표로만 제한합니다.
+    _AUDIENCE_RATIO_PRIORITY = {
+        "family": ["youth_10s_ratio", "middle_4060_ratio"],
+        "corporate": ["middle_4060_ratio"],
+        "healing": ["young_2030_ratio", "middle_4060_ratio"],
+        "senior": ["senior_70s_ratio", "middle_4060_ratio"],
+        "active": ["young_2030_ratio"],
+    }
+    _RATIO_FIELD_LABELS = {
+        "youth_10s_ratio": "10대 이하 비중",
+        "young_2030_ratio": "2030대 비중",
+        "middle_4060_ratio": "40~60대 비중",
+        "senior_70s_ratio": "70대 이상 비중",
+    }
+    if not include_market_insights or not market_insight:
+        market_insight_context_str = "(빅데이터 지표 없음 - 정성적 제안만 작성하고 수치는 지어내지 마세요)"
+        emphasis_instruction = ""
+    else:
+        parts = [f"{market_insight['region_dong']} {market_insight['year_month']} 방문객 {market_insight['total_visitors']:,}명"]
+        if market_insight.get("yoy_growth_rate") is not None:
+            parts.append(f"(전년 대비 {market_insight['yoy_growth_rate']}%)")
+        if market_insight.get("female_ratio") is not None:
+            parts.append(f"여성 비중 {market_insight['female_ratio']}%")
+        if market_insight.get("young_2030_ratio") is not None:
+            parts.append(f"2030 청년층 비중 {market_insight['young_2030_ratio']}%")
+        if market_insight.get("middle_4060_ratio") is not None:
+            parts.append(f"4060대 비중 {market_insight['middle_4060_ratio']}%")
+        if market_insight.get("senior_70s_ratio") is not None:
+            parts.append(f"70대 이상 비중 {market_insight['senior_70s_ratio']}%")
+        if market_insight.get("foreign_visitors") is not None:
+            parts.append(f"외국인 방문객 {market_insight['foreign_visitors']:,}명")
+        market_insight_context_str = "📊 " + ", ".join(parts)
+
+        # 강조 후보 지표 중 실제로 값이 있는 것만 선택 (없는 지표를 "두드러진다"고 단정 금지)
+        priority_fields = _AUDIENCE_RATIO_PRIORITY.get(target_audience, _AUDIENCE_RATIO_PRIORITY["family"])
+        available_labels = [
+            _RATIO_FIELD_LABELS[f] for f in priority_fields if market_insight.get(f) is not None
+        ]
+        if available_labels:
+            emphasis_instruction = "과 ".join(available_labels) + " (이 값들만 실제 데이터이니 이 항목만 언급하세요)"
+        else:
+            emphasis_instruction = (
+                "해당 타겟층 연령대 비율 데이터 없음 - 방문객 수/증감률/외국인 수만 언급하고 "
+                "연령대 비중은 절대 언급하지 마세요"
+            )
+
+    # 지역명이 아니라 방문객 통계 조건(예: "외국인이 많았던 지역")으로 질문했을 때, 그 조건으로
+    # 어떤 지역이 왜 선정됐는지를 LLM 이 상품 개요에 근거로 밝히도록 컨텍스트에 명시합니다.
+    market_location_resolution = b2b_params.get("market_location_resolution")
+    if market_location_resolution:
+        metric_label = _MARKET_METRIC_LABELS.get(
+            market_location_resolution["metric"], market_location_resolution["metric"]
+        )
+        location_resolution_str = (
+            f"이 상품의 대상 지역은 사용자가 지역명을 직접 지정하지 않고 \"{metric_label}\" 기준으로 요청하여, "
+            f"{market_location_resolution['year_month']} 기준 {metric_label} "
+            f"{'1위' if market_location_resolution['direction'] == 'desc' else '최하위'} 지역인 "
+            f"{market_location_resolution['region_dong']}(값: {market_location_resolution['value']})으로 "
+            f"visitor_analytics 데이터 조회를 통해 자동 선정되었습니다."
+        )
+    else:
+        location_resolution_str = "(해당 없음 - 사용자가 지역을 직접 지정했거나 지역 조건이 없는 질의)"
+
+    # 예상 1인 단가 범위 산정에 필요한 작물×행정구역 조합 수를 미리 세어둡니다(섹션 3의 비짓제주
+    # API 조회용 unique_combos 와 동일한 조합 집합이지만, 가격 산정은 조합 "개수"만 필요하고
+    # API 응답 내용은 필요 없으므로 여기서는 API 호출 없이 개수만 계산합니다 — 실제 조합 리스트/
+    # API 조회는 섹션 3에서 그대로 재사용합니다). 섹션 3이 1순위 코스(chunks[0])로만 제한되므로
+    # 여기서도 반드시 chunks[0]만 세야 합니다 — 그렇지 않으면 검색된 다른 코스의 조합까지 단가에
+    # 반영되어, 실제로 섹션 3에 나오지 않는 조합 수를 근거로 가격이 산정되는 불일치가 생깁니다.
+    # strict_single_crop(예: "당근만"/"오직 마늘만") 이면 이 코스의 다른 공동 재배 작물은
+    # 단가 산정 조합 수/로컬 제휴 조회/아이디어 프롬프트에서 모두 동일하게 제외합니다 —
+    # 이 노드 뒷부분(unique_combos, 로컬 제휴 아이디어 프롬프트)에서도 재사용하는 값이라
+    # chunks[0]/b2b_params 가 바뀌지 않는 이 함수 안에서는 한 번만 계산합니다.
+    _effective_top_course_crops = _resolve_effective_crops(chunks[0], b2b_params)
+    _price_combo_set = set()
+    for crop in _effective_top_course_crops:
+        for area in [x.strip() for x in chunks[0]["administrative_areas"].split(",") if x.strip()]:
+            _price_combo_set.add((crop, area))
+    price_range_str = _estimate_price_range(chunks[0], target_audience, len(_price_combo_set))
+    price_breakdown_str = _build_price_breakdown_str(chunks[0], target_audience, len(_price_combo_set))
+
+    # strict_single_crop 이 실제로 적용된 경우(타겟 작물이 코스 1의 실제 crops 목록에 있어
+    # _resolve_effective_crops 가 단일 작물로 좁혔을 때)에만, 섹션 1·2 작성 LLM에게 다른 작물을
+    # 일절 언급하지 말라는 절대 규칙을 추가로 지시합니다. 대상 작물이 이 코스에서 재배되지
+    # 않아 가드가 적용되지 않은 경우(fail-soft)는 이 지시도 함께 생략합니다 — 지시만 내리고
+    # 실제 데이터 필터링은 하지 않으면 "왜 코스 1의 crops 에 있는 다른 작물을 숨기라는 거냐"는
+    # 모순이 생기므로, 이 지시는 항상 _resolve_effective_crops 의 실제 판단과 함께 움직여야 합니다.
+    _strict_single_crop_target = (b2b_params.get("key_item_or_crop") or "").strip()
+    strict_single_crop_applied = (
+        bool(b2b_params.get("strict_single_crop"))
+        and bool(_strict_single_crop_target)
+        and _effective_top_course_crops == [_strict_single_crop_target]
+    )
+    if strict_single_crop_applied:
+        strict_single_crop_rule_str = (
+            f"5. 사용자가 \"{_strict_single_crop_target}만\"/\"오직 {_strict_single_crop_target}만\" 처럼 "
+            f"이번 상품을 \"{_strict_single_crop_target}\" 단일 작물로만 배타적으로 한정해 달라고 "
+            f"요청했습니다. [코스 1]의 실제 재배작물 목록에 다른 작물이 더 있더라도, 섹션 1(상품명/"
+            f"USP/Market Insight 서술)과 섹션 2(타임라인 해설)에서 \"{_strict_single_crop_target}\" 이외의 "
+            f"작물은 이름조차 언급하거나 암시하지 마세요 — 상품명/USP/타임라인 포인트 모두 "
+            f"\"{_strict_single_crop_target}\" 단일 테마로만 서술하세요."
+        )
+    else:
+        strict_single_crop_rule_str = ""
+
+    system_prompt = load_prompt("generate_report.md").format(
+        weather_description=weather.get('description', ''),
+        weather_warnings=', '.join(weather.get('warnings', [])) or '없음',
+        culture_context_str=culture_context_str,
+        segments_str=segments_str,
+        market_insight_context_str=market_insight_context_str,
+        target_audience=target_audience,
+        emphasis_instruction=emphasis_instruction or "(없음 - 정성적 제안만)",
+        location_resolution_str=location_resolution_str,
+        price_range_str=price_range_str,
+        price_breakdown_str=price_breakdown_str,
+        fallback=fallback,
+        reason=reason,
+        strict_single_crop_rule_str=strict_single_crop_rule_str,
+    )
+
+    user_msg = f"[질문(방문 조건)]: {query}\n\n[검색 결과 컨텍스트]:\n{context_str}"
+
+    docent_answer = get_chat_completion(system_prompt, user_msg)
+
+    # --- 섹션 3·4·5 (로컬 상생 제휴 아이디어 / 기후 리스크 & Plan B / Trust Tagging) ---
+    # 섹션 1·2 작성이 비정상적으로 빈 문자열을 반환한 경우를 대비한 안전망(사실상 발생하지 않음 —
+    # chunks 는 위에서 이미 비어있지 않음을 확인함). 이 경로에서는 섹션 3~5 없이 그대로 반환합니다.
+    if not docent_answer:
+        return {"docent_answer": docent_answer, "final_response": docent_answer, "recommendations": []}
+
+    recommendations = []
+    introduction_snippets = []
+    rec_cache: Dict[Any, Any] = {}
+
+    # 검색된 상위 코스들의 작물 및 행정구역 조합에 대해 비짓제주 소개 정보를 참고 재료로 수집합니다.
+    # 조합 개수만큼 API 호출이 하나씩 순서대로 쌓이면 지연이 누적되므로(조합이 여러 개인 리포트일수록
+    # 체감 지연이 커짐), 먼저 중복 없는 조합만 추려 스레드풀로 동시에 조회한 뒤(get_visit_jeju_recommendations
+    # 는 내부적으로 실패 시 예외를 던지지 않고 Mock 데이터로 폴백하므로 여기서의 except 는 순수 방어용),
+    # 그 결과를 원래 코스 순서대로 다시 조립합니다 — 조립 단계는 API 호출이 없는 순수 로컬 연산이라
+    # 병렬화할 필요가 없습니다.
+    unique_combos = []
+    seen_combos = set()
+    if chunks:
+        chunk = chunks[0]
+        crops = _effective_top_course_crops
+        areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
+        for crop in crops:
+            for area in areas:
+                combo = (crop, area)
+                if combo not in seen_combos:
+                    seen_combos.add(combo)
+                    unique_combos.append(combo)
+
+    if unique_combos:
+        with ThreadPoolExecutor(max_workers=min(8, len(unique_combos))) as executor:
+            future_to_combo = {
+                executor.submit(get_visit_jeju_recommendations, crop, area): (crop, area)
+                for crop, area in unique_combos
+            }
+            for future, combo in future_to_combo.items():
+                try:
+                    rec_cache[combo] = future.result()
+                except Exception as e:
+                    print(f"[!] 비짓제주 API 조회 실패(작물={combo[0]}, 지역={combo[1]}), 이 조합은 건너뜁니다: {e}")
+                    rec_cache[combo] = []
+
+    if chunks:
+        chunk = chunks[0]
+        crops = _effective_top_course_crops
+        areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
+
+        for crop in crops:
+            for area in areas:
+                rec_list = rec_cache.get((crop, area), [])
+                for rec in rec_list:
+                    recommendations.append(rec)
+                    intro = (rec.get("introduction") or "").strip()
+                    if intro and intro not in introduction_snippets:
+                        introduction_snippets.append(intro)
+
+    # ## 3. ☕ 로컬 상생 제휴 및 상품화 아이디어 (표)
+    if introduction_snippets:
+        reference_str = "\n".join(f"- {s}" for s in introduction_snippets[:6])
+        idea_system_prompt = load_prompt("local_ideas.md")
+        # strict_single_crop 적용 시(_effective_top_course_crops 가 타겟 작물 1종으로 좁혀진
+        # 경우) 아이디어 생성 프롬프트에도 원본 crops 전체 문자열이 아니라 좁혀진 작물만 전달해,
+        # 다른 공동 재배 작물이 아이디어에 섞여 들어가지 않게 합니다.
+        idea_user_msg = f"[코스 매개 작물/테마]: {', '.join(_effective_top_course_crops)}\n\n[지역 로컬 상점 소개 참고자료]:\n{reference_str}"
+        local_ideas = get_chat_completion(idea_system_prompt, idea_user_msg)
+    else:
+        local_ideas = "*현재 이 지역에 참고할 로컬 상점 소개 정보가 없어 아이디어 제안을 생략합니다.*"
+
+    report = docent_answer.rstrip() + "\n\n"
+    report += "## 3. ☕ 로컬 상생 제휴 및 상품화 아이디어\n"
+    report += "*(실제 매장 디렉토리가 아니라, 해당 지역 로컬 상점 성격에서 착안한 협업 컨셉 제안입니다. 개별 매장 운영 현황은 별도 확인이 필요합니다.)*\n\n"
+    report += local_ideas.rstrip() + "\n"
+
+    # ## 4. 🌤️ 기후 리스크 및 Plan B 우회 동선
+    total_distance = chunks[0].get("total_distance_km")
+    course_name = chunks[0].get("course_name", "코스")
+    report += "\n## 4. 🌤️ 기후 리스크 및 Plan B 우회 동선\n"
+    report += f"- **[기후 환경]**: {weather.get('description', '')}"
+    warnings = weather.get("warnings") or []
+    if warnings:
+        report += f" / 유의사항: {', '.join(warnings)}"
+    report += "\n"
+    report += f"- **[Plan A (정상 운용)]**: {course_name} 전체 코스 풀 도보 트레킹"
+    if total_distance:
+        report += f" ({total_distance}km)"
+    report += "\n"
+    if safety.get("reroute_required"):
+        plan_b = safety.get("alternative_query_override") or "해안 구간 대신 중산간/숲길 우회 동선"
+        report += f"- **[Plan B (우회/대체)]**: {safety.get('safety_status', 'WARNING')} 상황 시 {plan_b}으로 전환, 필요 시 실내 체험 프로그램으로 대체\n"
+    else:
+        report += "- **[Plan B (우회/대체)]**: 현재 특이 리스크는 없으나, 돌발 강풍·우천 시를 대비해 단축 동선 및 실내 체험/휴게 프로그램으로의 전환 대안을 상시 준비\n"
+
+    # ## 5. 🛡️ Trust Tagging — 고정 문구가 아니라 이번 리포트에 실제로 쓰인 데이터 출처를
+    # 구체적으로 나열합니다(예: "2026년 5월 제주관광공사 이동통신 빅데이터 기반 OO동 방문객
+    # 통계"). 로컬 제휴 아이디어는 실 비짓제주 API 응답인지 Mock 폴백인지도 구분해서 밝힙니다 —
+    # 방화벽/응답 지연으로 실 API가 막혀 있을 때 실 데이터인 것처럼 표시하면 안 되므로.
+    source_labels = []
+
+    course_names = []
+    for c in chunks:
+        name = c.get("course_name")
+        if name and name not in course_names:
+            course_names.append(name)
+    if course_names:
+        source_labels.append(f"제주올레 {'·'.join(course_names)} 원문 가이드북")
+
+    if culture_chunks:
+        crop_names = []
+        for cc in culture_chunks:
+            crop = cc.get("target_crop") or cc.get("crop_name")
+            if crop and crop not in crop_names:
+                crop_names.append(crop)
+        if crop_names:
+            source_labels.append(f"제주 밭담문화·작물 지식 DB({'·'.join(crop_names)} 등 {len(culture_chunks)}건)")
+        else:
+            source_labels.append(f"제주 밭담문화·작물 지식 DB({len(culture_chunks)}건)")
+
+    if market_insight:
+        year, month = market_insight["year_month"].split("-")
+        source_labels.append(
+            f"{year}년 {int(month)}월 제주관광공사 이동통신 빅데이터 기반 "
+            f"{market_insight['region_dong']} 방문객 통계"
+        )
+
+    rec_sources = {rec.get("source") for rec in recommendations if rec.get("source")}
+    if "visitjeju_api" in rec_sources:
+        source_labels.append("비짓제주 실 API 기반 제휴 아이디어")
+    elif "mock_db" in rec_sources:
+        source_labels.append("비짓제주 Mock 데이터 기반 제휴 아이디어(실 API 미가동 시 대체)")
+
+    # 별점은 이 시점에서 확정할 수 없습니다 — 그래프 순서상 실제 Self-RAG 단계인 quality_checker 가
+    # 아직 실행되기 전이라 quality_report 가 없기 때문입니다. 그래서 이전에는 여기서
+    # fallback_applied 여부만으로 4/5점을 임의로 매겼는데, "Self-RAG 신뢰도"라는 라벨과 실제
+    # 근거가 안 맞는 문제였습니다. 자리표시자만 남겨두고, check_quality_node 가 자신의 실제
+    # 평가 결과로 치환합니다.
+    source_labels.append(f"Self-RAG 신뢰도: {_SELF_RAG_STARS_PLACEHOLDER}")
+
+    report += "\n## 5. 🛡️ Trust Tagging\n"
+    report += f"[출처: {' / '.join(source_labels)}]\n"
+
+    return {
+        "docent_answer": docent_answer,
+        "recommendations": recommendations,
+        "final_response": report
+    }

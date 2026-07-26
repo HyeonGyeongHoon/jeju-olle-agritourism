@@ -190,6 +190,38 @@ def test_retrieve_rag_node_treats_null_distance_as_zero_instead_of_crashing():
     assert chunks[0]["total_distance_km"] == 0.0
 
 
+def test_retrieve_rag_node_treats_null_crops_and_areas_as_empty_string_instead_of_crashing():
+    """crops/administrative_areas 컬럼 값이 NULL(None)이어도(키 자체는 존재) 청크 조립이
+    죽지 않고 빈 문자열로 안전하게 처리되어야 합니다 — `.get(key, "")` 는 키가 있으면 그
+    None 값을 그대로 반환해 이후 `_resolve_effective_crops` 의 `.split(",")` 호출에서
+    AttributeError 가 났었습니다."""
+    courses_table = _FakeCoursesTable(
+        rdb_ids=[1],
+        course_meta_by_id={
+            1: {
+                "course_name": "1코스", "crops": None, "administrative_areas": None,
+                "total_distance_km": 15.0, "estimated_time_text": "5시간", "difficulty": "중",
+            },
+        },
+    )
+    client = _FakeClient(
+        courses_table,
+        rpc_data=[
+            {"id": 10, "course_id": 1, "title": "청크", "content": "...", "similarity": 0.9},
+        ],
+    )
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(_base_state())
+
+    chunks = result["retrieved_chunks"]
+    assert len(chunks) == 1
+    assert chunks[0]["crops"] == ""
+    assert chunks[0]["administrative_areas"] == ""
+
+
 def test_retrieve_rag_node_stops_without_substitution_when_target_course_fails_hard_constraint():
     """사용자 요청: "휠체어가 필요한 2코스 기획서 만들어줘"처럼 지정한 코스가 하드 제약(휠체어)을
     만족 못 하면, 다른 코스로 조용히 대체 추천하지 말고 chunks=[] 와 함께 구체적인 사유만 남겨야

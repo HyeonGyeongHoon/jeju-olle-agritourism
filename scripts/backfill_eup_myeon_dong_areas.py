@@ -39,10 +39,11 @@ from typing import Any, Dict, List, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 법정리/법정동 -> 행정 읍/면/동 매핑은 nodes.py 가 data/jeju_districts.csv 에서 이미 로드해 둔
-# 것을 그대로 재사용합니다(중복 구현 시 두 곳이 어긋날 위험이 있어 의도적으로 import 합니다).
-from src.agent.nodes import _LEGAL_DONG_TO_ADMIN_DONG  # noqa: E402
+# 법정리/법정동 -> 행정 읍/면/동 매핑은 서비스 레이어(db_service)가 data/jeju_districts.csv 에서
+# 이미 로드해 둔 것을 그대로 재사용합니다(중복 구현 시 두 곳이 어긋날 위험이 있어 의도적으로
+# import 합니다). 2026-07-26 이전에는 src.agent.nodes 에 있었습니다.
 from src.ingestion.database_loader import get_supabase_client  # noqa: E402
+from src.services.db_service import _LEGAL_DONG_TO_ADMIN_DONG  # noqa: E402
 
 EUP_MYEON_COLUMN = "eup_myeon_dong_areas"
 

@@ -12,7 +12,7 @@ from scripts.backfill_eup_myeon_dong_areas import (
     resolve_eup_myeon_for_course,
     split_area_tokens,
 )
-from src.agent.nodes import _LEGAL_DONG_TO_ADMIN_DONG
+from src.services.db_service import _LEGAL_DONG_TO_ADMIN_DONG
 
 # 실제 data/jeju_districts.csv 의 관련 부분만 뽑은 고정 매핑(테스트를 CSV 변경으로부터 격리).
 _MAPPING = {
