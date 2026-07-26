@@ -1,4 +1,8 @@
-from src.agent.graph import route_after_location_resolve, route_after_rewrite
+from src.agent.graph import (
+    route_after_location_resolve,
+    route_after_retriever,
+    route_after_rewrite,
+)
 from src.models.schema import IntentCategory
 
 
@@ -20,6 +24,30 @@ def test_route_after_location_resolve_sends_non_recommendation_to_info_lookup():
         assert route_after_location_resolve(state) == "quick_response", (
             f"{category.value} 의도는 quick_responder 선로로 라우팅되어야 합니다."
         )
+
+
+def test_route_after_retriever_sends_exit_early_to_quick_responder():
+    """정책 전환(2026-07-25 무조건 반려): retriever 가 DB 매칭 0건으로 검색을 중단하면
+    (is_exit_early=True) report_generator 를 호출하지 않고 quick_responder 로 넘겨 반려 사유만
+    반환해야 합니다."""
+    state = {"is_exit_early": True, "exit_reason": "지역과 겹치는 코스 없음"}
+    assert route_after_retriever(state) == "exit_early"
+
+
+def test_route_after_retriever_sends_normal_result_to_report_generator():
+    """대조군: 코스를 찾은 정상 경로는 기존과 동일하게 report_generator 로 진행해야 합니다."""
+    assert route_after_retriever({"is_exit_early": False}) == "generate_report"
+    # 플래그가 아예 없는 상태(구버전 호출부/테스트 입력)도 반려로 오인하지 않아야 합니다.
+    assert route_after_retriever({}) == "generate_report"
+
+
+def test_route_after_retriever_target_maps_exist_in_compiled_graph():
+    """조건부 엣지의 두 목적지 키가 실제 그래프 노드와 연결돼 있는지(오타 방지) 확인합니다."""
+    from src.agent.graph import agent_runtime
+
+    nodes = agent_runtime.get_graph().nodes
+    assert "quick_responder" in nodes
+    assert "report_generator" in nodes
 
 
 def test_route_after_rewrite_returns_to_quick_response():

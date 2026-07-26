@@ -52,6 +52,10 @@ _RULE_BASED_REASON = {
     "specific_course_opinion": (
         "규칙 기반 1단계: 이미 지목한 특정 코스에 대한 의견/적합성 문의(코스 정보 질의)"
     ),
+    "proposal_without_recommend_word": (
+        "규칙 기반 1단계: '추천' 토큰 없이 코스/올레 + 기획서·기획안 등 결과물 생성 요청이 "
+        "확인됨"
+    ),
 }
 
 
@@ -108,6 +112,29 @@ def _rule_based_precheck(query: str) -> RouterResult | None:
             category=IntentCategory.OTHER,
             target_course=None,
             reason=_RULE_BASED_REASON["plain_course_recommendation"],
+        )
+
+    # 1-b) 결과물 생성 요청(기획서/기획안/기획해/상품 기획/상품화)이 "추천" 토큰 없이
+    # "코스"/"올레" 언급과 함께 있는 질의("당근 코스 기획서 써줘")도, 위 1)이 다루는
+    # "추천은 있고 기획서는 없는" 조합과 대칭되는 또 다른 경계 사례입니다. 라이브 QA에서
+    # 이 조합 역시 LLM 2단계 분류가 course_recommendation/other 사이를 오가는 비결정적
+    # 동작을 보였습니다(동일 질의 3회 반복 중 2회 other로 오분류) — CLAUDE.md에 이미
+    # 문서화된 "코스+추천" 비결정성과 같은 원인 계열의 별개 관측입니다.
+    # "추천"까지 함께 있는 조합(has_recommend_ask=True)은 이 규칙 대상이 아니라 위의
+    # is_plain_course_recommendation 처리 이후 그대로 LLM 2단계로 넘어갑니다 — 그 조합은
+    # 지금까지 비결정성이 보고된 적이 없고 LLM이 안정적으로 course_recommendation을
+    # 반환해 왔으므로(test_route_intent_does_not_decline_when_proposal_keyword_present),
+    # 불필요하게 규칙 범위를 넓히지 않습니다.
+    # 특정 코스가 이미 지목된 경우("1코스로 기획서 만들어줘")도 이 규칙 범위에서 제외합니다
+    # — 그 조합 역시 지금까지 LLM이 안정적으로 course_recommendation을 반환해 왔고
+    # (test_route_intent_does_not_decline_proposal_for_specific_course), 이번에 보고된
+    # 비결정성 사례는 특정 코스를 지목하지 않은 질의에 한정되어 있어 규칙 범위를 그만큼만
+    # 좁혀 불필요한 동작 변경을 피합니다.
+    if has_course_ref and has_proposal_ask and not has_recommend_ask and specific_course is None:
+        return RouterResult(
+            category=IntentCategory.COURSE_RECOMMENDATION,
+            target_course=None,
+            reason=_RULE_BASED_REASON["proposal_without_recommend_word"],
         )
 
     # 2) 부적절한 표현

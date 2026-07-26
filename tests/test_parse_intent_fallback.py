@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 from src.agent import nodes
@@ -33,3 +34,53 @@ def test_parse_intent_fallback_on_malformed_json_also_checks_keyword():
         result = parse_intent_node(state)
 
     assert result["parsed_constraints"]["hard_constraints"]["wheelchair_required"] is True
+
+
+def test_parse_intent_maps_strict_single_crop_true_from_llm_json_into_b2b_params():
+    """독점 작물 한정 옵션: LLM이 "당근만을 활용한" 같은 배타적 단일 작물 표현을 감지해
+    strict_single_crop=true 를 반환하면, 그 값이 B2BQueryParams(b2b_params)에 그대로
+    매핑되어야 한다."""
+    state = {"query": "당근만을 활용한 코스 기획서 써줘"}
+    llm_json = json.dumps({
+        "hard_constraints": {"wheelchair_required": False},
+        "vector_query": "당근 밭길",
+        "target_month": None,
+        "season": None,
+        "key_item_or_crop": "당근",
+        "preferred_location": None,
+        "market_location_query": None,
+        "concept_theme": None,
+        "target_audience": "family",
+        "include_market_insights": True,
+        "strict_single_crop": True,
+    }, ensure_ascii=False)
+
+    with patch.object(nodes, "get_chat_completion", return_value=llm_json):
+        result = parse_intent_node(state)
+
+    assert result["b2b_params"]["strict_single_crop"] is True
+    assert result["b2b_params"]["key_item_or_crop"] == "당근"
+
+
+def test_parse_intent_defaults_strict_single_crop_false_when_llm_omits_it():
+    """회귀 방지: 단순히 작물을 지정만 한 질의("당근 코스 기획서 써줘")에서 LLM이 배타적 한정
+    의도가 없다고 판단해 strict_single_crop 을 false 로 반환하면(또는 필드를 생략하면),
+    b2b_params 에도 false 로 반영되어 기존 동작(모든 작물 노출)이 유지되어야 한다."""
+    state = {"query": "당근 코스 기획서 써줘"}
+    llm_json = json.dumps({
+        "hard_constraints": {"wheelchair_required": False},
+        "vector_query": "당근 코스",
+        "target_month": None,
+        "season": None,
+        "key_item_or_crop": "당근",
+        "preferred_location": None,
+        "market_location_query": None,
+        "concept_theme": None,
+        "target_audience": "family",
+        "include_market_insights": True,
+    }, ensure_ascii=False)
+
+    with patch.object(nodes, "get_chat_completion", return_value=llm_json):
+        result = parse_intent_node(state)
+
+    assert result["b2b_params"]["strict_single_crop"] is False

@@ -161,6 +161,115 @@ def test_route_intent_declines_when_specific_course_is_only_excluded(
     assert result.category == IntentCategory.OTHER
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "당근 코스 기획서 써줘",
+        "감귤 코스 기획안 필요해",
+        "올레 코스로 상품 기획해줘",
+        "동부 코스 상품화 검토해줘",
+        # strict_single_crop 배타 표현이 섞여 있어도(별도 회귀 없음 확인 목적) 이 규칙에
+        # 그대로 걸려야 합니다.
+        "당근만을 활용한 코스 기획서 써줘",
+        "오직 마늘만 쓰는 코스 기획안 만들어줘",
+    ],
+)
+def test_route_intent_deterministically_classifies_proposal_without_recommend_word(
+    monkeypatch, query
+):
+    """회귀 방지(라이브 QA 발견, CLAUDE.md에 문서화된 '코스+추천' 비결정성과 같은
+    원인 계열의 별개 사례): "당근 코스 기획서 써줘"처럼 "추천" 토큰 없이 "코스"+"기획서"
+    (또는 기획안/기획해/상품 기획/상품화)만 있는 질의가, LLM 2단계 분류에서 실행마다
+    course_recommendation/other 사이를 오가는 비결정적 동작을 보였습니다(동일 질의 3회
+    반복 중 2회 other로 오분류). 이 조합도 '추천' 있는 조합과 마찬가지로 규칙 기반
+    1단계에서 LLM 호출 없이 course_recommendation 으로 확정되어야 합니다."""
+    mock_llm = MagicMock()
+    monkeypatch.setattr(router, "get_chat_completion", mock_llm)
+
+    result = router.route_intent(query)
+
+    mock_llm.assert_not_called()
+    assert result.category == IntentCategory.COURSE_RECOMMENDATION
+    assert "규칙 기반" in result.reason
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "당근 코스 기획서 써줘",
+        "올레 코스로 상품 기획해줘",
+    ],
+)
+def test_route_intent_proposal_without_recommend_word_is_deterministic_across_repeated_calls(
+    monkeypatch, query
+):
+    """핵심 검증: 규칙 기반 프리체크만으로 확정되므로, LLM 이 (설령 호출되더라도) 매번
+    다른 결과를 반환하도록 설정해도 반복 호출 결과가 항상 동일해야 합니다. LLM 자체가
+    전혀 호출되지 않는다는 사실이 결정론을 보장하는 핵심 근거이므로, mock 이 실제로 매번
+    다른 값을 주더라도(LLM이 호출됐다면 흔들렸을 상황을 시뮬레이션) 결과가 안 흔들리는지
+    함께 확인합니다."""
+    call_count = {"n": 0}
+
+    def flaky_llm(system_prompt, q):
+        call_count["n"] += 1
+        # 실제로 호출된다면 매 호출마다 다른 카테고리를 반환해 비결정성을 재현하도록
+        # 일부러 흔들리는 mock 입니다. 규칙 기반 프리체크가 정상 동작한다면 이 함수는
+        # 아예 호출되지 않아야 합니다.
+        category = "other" if call_count["n"] % 2 == 0 else "course_recommendation"
+        return f'{{"category": "{category}", "target_course": null, "reason": "mock"}}'
+
+    monkeypatch.setattr(router, "get_chat_completion", flaky_llm)
+
+    results = [router.route_intent(query).category for _ in range(5)]
+
+    assert call_count["n"] == 0, "규칙 기반 프리체크로 확정되어야 하므로 LLM이 호출되면 안 됩니다"
+    assert results == [IntentCategory.COURSE_RECOMMENDATION] * 5
+
+
+def test_route_intent_still_calls_llm_when_recommend_word_also_present_with_proposal(
+    monkeypatch,
+):
+    """회귀 방지: '추천'과 '기획서'가 함께 있는 조합(예: "당근 코스 추천해서 기획서
+    만들어줘")은 이번에 추가한 규칙(추천 없음 조건)의 대상이 아니므로 여전히 기존처럼
+    LLM 2단계 분류로 넘어가야 합니다 - 이 조합은 라이브에서 비결정성이 보고된 적이 없어
+    규칙 범위를 넓히지 않았습니다."""
+    fake_response = """{
+        "category": "course_recommendation",
+        "target_course": null,
+        "reason": "테마 기획서 생성 요청"
+    }"""
+    mock_llm = MagicMock(return_value=fake_response)
+    monkeypatch.setattr(router, "get_chat_completion", mock_llm)
+
+    result = router.route_intent("당근 코스 추천해서 기획서 만들어줘")
+
+    mock_llm.assert_called_once()
+    assert result.category == IntentCategory.COURSE_RECOMMENDATION
+
+
+def test_route_intent_still_calls_llm_when_specific_course_proposal_without_recommend_word(
+    monkeypatch,
+):
+    """회귀 방지: 특정 코스가 이미 지목된 상태의 기획서 요청("1코스로 기획서 만들어줘")은
+    이번 규칙의 대상에서 의도적으로 제외했습니다 - 그 조합은 지금까지 LLM이 안정적으로
+    course_recommendation 을 반환해 왔고(비결정성이 보고된 적 없음), 이번에 보고된
+    비결정성 사례는 특정 코스를 지목하지 않은 질의에 한정되어 있어 규칙 범위를 그만큼만
+    좁혔습니다. 규칙 범위가 잘못 넓어져 이 조합까지 LLM 호출을 건너뛰지 않는지 확인합니다."""
+    fake_response = """{
+        "category": "course_recommendation",
+        "target_course": "1코스",
+        "reason": "특정 코스 기반 기획서 생성 요청"
+    }"""
+    mock_llm = MagicMock(return_value=fake_response)
+    monkeypatch.setattr(router, "get_chat_completion", mock_llm)
+
+    result = router.route_intent("1코스로 기획서 만들어줘")
+
+    mock_llm.assert_called_once()
+    assert result.category == IntentCategory.COURSE_RECOMMENDATION
+    assert result.target_course == "1코스"
+
+
 def test_route_intent_does_not_decline_proposal_for_specific_course(monkeypatch):
     """재확인: "1코스로 기획서 만들어줘" 류는 결과물 생성 키워드가 있어 원래도 거절되지
     않았고, 특정 코스 예외 추가 후에도 그대로여야 합니다."""

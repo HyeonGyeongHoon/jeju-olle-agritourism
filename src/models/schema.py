@@ -124,6 +124,14 @@ class B2BQueryParams(BaseModel):
         default=True,
         description="제주관광공사 방문객 빅데이터(Market Insight) 섹션 포함 여부",
     )
+    strict_single_crop: bool = Field(
+        default=False,
+        description=(
+            "'당근만', '오직 마늘만을 활용한' 처럼 단 하나의 작물로만 리포트를 배타적으로 "
+            "한정하려는 의도가 명확한 경우 true. 단순히 작물을 지정만 한 경우(예: '당근 코스 "
+            "기획서')는 false — 그 코스의 다른 재배 작물도 그대로 노출/가산되어야 함"
+        ),
+    )
 
 
 class VisitorAnalyticsSchema(BaseModel):

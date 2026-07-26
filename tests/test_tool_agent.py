@@ -1,3 +1,4 @@
+from datetime import date
 from unittest.mock import patch
 
 import pytest
@@ -121,6 +122,63 @@ def test_tool_agent_node_skips_tool_calls_for_other_intent():
 
     mock_llm.assert_not_called()
     assert res.get("tool_calls") is None
+
+
+def test_tool_agent_node_skips_tool_calls_when_retriever_exited_early():
+    """정책 전환(2026-07-25 무조건 반려): retrieve_rag_node 가 DB 매칭 0건으로 검색을 중단하면
+    quick_responder_node 가 반려 메시지를 final_response 로 써둡니다. 이 노드가 b2b_params 에
+    그대로 남아있는 preferred_location/key_item_or_crop 만 보고 통계·작물 도구를 재호출하면 그
+    반려가 "대신 이런 정보가 있다"는 대체 안내로 덮어써집니다. 이 검사는 pending_tool_calls 계산
+    보다 먼저 있어야 합니다 — 반려 케이스는 정의상 그 필터 값이 b2b_params 에 살아있는 케이스라,
+    뒤에 두면 has_grounded_answer 검사가 그랬듯 도달 불가능한 죽은 코드가 됩니다."""
+    state: AgentState = {
+        "query": "대정읍 마늘 코스로 기획서 만들어줘",
+        "intent_category": IntentCategory.COURSE_RECOMMENDATION.value,
+        "is_exit_early": True,
+        "exit_reason": "'대정읍' 지역과 직접 겹치는 올레 코스를 찾지 못해 기획서를 생성할 수 없습니다.",
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "loop_count": 0,
+        "b2b_params": {
+            "key_item_or_crop": "마늘", "preferred_location": "대정읍",
+            "market_location_query": None,
+        },
+        "final_response": "요청하신 조건으로는 기획서를 작성할 수 없습니다. '대정읍' 지역과...",
+    }
+
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_not_called()
+    assert res == {"tool_calls": None}
+
+
+def test_tool_agent_node_still_skips_on_quality_retry_when_exited_early():
+    """반려 경로는 품질 재시도(quality_report 실패)로 되돌아와도 도구를 부를 이유가 없습니다 —
+    check_quality_node 가 is_exit_early 를 즉시 통과시키므로 이 상황 자체가 정상적으로는 발생하지
+    않지만, 발생해도 반려 메시지를 덮어쓰지 않아야 합니다(should_continue 가 곧 end 로 보냄)."""
+    state: AgentState = {
+        "query": "대정읍 마늘 코스로 기획서 만들어줘",
+        "intent_category": IntentCategory.COURSE_RECOMMENDATION.value,
+        "is_exit_early": True,
+        "exit_reason": "'마늘' 작물과 직접 겹치는 올레 코스를 찾지 못해 기획서를 생성할 수 없습니다.",
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": {"passed": False, "feedback": "근거 부족"},
+        "loop_count": 0,
+        "b2b_params": {
+            "key_item_or_crop": "마늘", "preferred_location": None,
+            "market_location_query": None,
+        },
+        "final_response": "요청하신 조건으로는 기획서를 작성할 수 없습니다. '마늘' 작물과...",
+    }
+
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_not_called()
+    assert res == {"tool_calls": None}
 
 
 def test_hybrid_correction_routing():
@@ -308,6 +366,30 @@ def test_tool_agent_includes_course_meta_and_no_alternative_recommendation_rule(
     assert "인용" in system_prompt
 
 
+def test_tool_agent_prompt_targets_b2b_planner_not_tourist():
+    """사용자 요청: 이 서비스는 관광객이 아니라 지자체 담당자/여행사 기획자를 위한 B2B 기획서
+    작성 도구인데, "외도동 최근 방문객 수는?" 같은 통계 질의의 답변에 "혼잡도를 고려해 여유 있게
+    일정을 계획해 보세요" 같은 관광객 대상 여행 조언이 섞여 나왔습니다(라이브 QA 2026-07-25).
+    system_prompt 가 답변 대상을 기획자로 명시하고, 여행 조언·감성 멘트를 금지하는지 검증합니다."""
+    state: AgentState = {
+        "query": "외도동 최근 방문객 수는?",
+        "tool_outputs": [{
+            "tool_name": "retrieve_visitor_statistics_tool",
+            "result": "[조회 성공]\n- 지역: 외도동\n- 기간: 2026-05\n- 항목: 총 방문객 수\n- 결과 값: 115,205명",
+        }],
+        "tool_depth": 1,
+        "quality_report": None,
+        "loop_count": 0,
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="외도동 2026년 5월 방문객 수는 115,205명입니다.") as mock_llm:
+        tool_agent_node(state)
+
+    system_prompt, _ = mock_llm.call_args[0]
+    assert "관광객이 아니라" in system_prompt
+    assert "기획자" in system_prompt
+    assert "여행 조언" in system_prompt or "감성 멘트" in system_prompt
+
+
 def test_tool_agent_includes_course_meta_at_max_depth_branch():
     """depth>=3 방어 분기도 최종 답변을 만들므로 같은 코스 근거/주의가 들어가야 합니다."""
     state: AgentState = {
@@ -370,6 +452,56 @@ def test_tool_agent_still_regenerates_when_previous_answer_had_no_grounding():
 
     mock_llm.assert_called_once()
     assert res["final_response"] == "준비물 안내"
+
+
+def test_tool_agent_does_not_requeue_tool_call_when_already_grounded_with_preferred_location():
+    """회귀 방지(2026-07-25 라이브 QA): "구좌읍 3월 방문객 수는?"처럼 quick_responder_node 가
+    이미 market_insight 를 정확히 조회해 grounded 답변을 만들어뒀는데도, b2b_params 에
+    preferred_location 이 여전히 남아있다는 이유만으로 has_grounded_answer 검사보다 먼저
+    pending_tool_calls 를 큐잉해 재호출하면 안 됩니다. 예전엔 이 검사가 pending_tool_calls
+    계산/조기 return 뒤에 있어서, 근거가 있는 케이스는 거의 항상 preferred_location/
+    key_item_or_crop 도 함께 세팅되어 있는 탓에 사실상 도달 불가능한 죽은 코드였습니다."""
+    state: AgentState = {
+        "query": "구좌읍 3월 방문객 수는?",
+        "target_course": None,
+        "course_meta": None,
+        "culture_chunks": [],
+        "market_insight": {"region_dong": "구좌읍", "year_month": "2026-03", "total_visitors": 460038},
+        "b2b_params": {"preferred_location": "구좌읍", "key_item_or_crop": None},
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "loop_count": 0,
+        "final_response": "구좌읍 2026년 3월 방문객 수는 460,038명입니다.",
+    }
+    with patch.object(nodes, "get_chat_completion") as mock_llm:
+        res = tool_agent_node(state)
+
+    mock_llm.assert_not_called()
+    assert res == {"tool_calls": None}
+
+
+def test_tool_agent_queues_tool_call_using_target_month_when_market_query_has_no_month():
+    """market_location_query 에 연/월이 없어도(통계-조건부 지역 추론이 아닌 일반 지역+월 직접
+    지정 질의), b2b_params.target_month 로 year_month 를 보완해야 합니다 - 안 그러면 도구가
+    year_month=None 으로 호출되어 최신월로 조용히 대체된 값을 돌려줍니다."""
+    state: AgentState = {
+        "query": "구좌읍 3월 방문객 수는?",
+        "target_course": None,
+        "course_meta": None,
+        "culture_chunks": [],
+        "market_insight": None,  # quick_responder 가 못 찾아서 이 노드가 직접 도구를 호출하는 케이스
+        "b2b_params": {"preferred_location": "구좌읍", "key_item_or_crop": None, "target_month": 3},
+        "tool_outputs": [],
+        "tool_depth": 0,
+        "quality_report": None,
+        "loop_count": 0,
+        "final_response": None,
+    }
+    res = tool_agent_node(state)
+
+    assert res["tool_calls"][0]["name"] == "retrieve_visitor_statistics_tool"
+    assert res["tool_calls"][0]["args"]["year_month"] == f"{date.today().year}-03"
 
 
 def test_tool_agent_still_regenerates_on_quality_retry_without_tool_outputs():

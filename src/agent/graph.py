@@ -27,6 +27,18 @@ def route_after_location_resolve(state: AgentState) -> str:
     return "quick_response"
 
 
+def route_after_retriever(state: AgentState) -> str:
+    """retriever 가 무조건 반려(Fail-Fast) 정책으로 검색을 중단했는지(is_exit_early) 검사해,
+    중단된 경우 report_generator 를 아예 호출하지 않고 quick_responder 로 제어를 넘겨 반려 사유만
+    반환하게 합니다(2026-07-25 정책 전환). retrieve_rag_node 의 세 필터(target_course /
+    preferred_location / key_item_or_crop) 중 하나라도 DB 매칭이 0건이면 그 노드가 벡터·문화지식
+    검색까지 전부 건너뛴 채 이 플래그를 세우므로, 여기서 기획서 생성 경로를 끊어 유료 LLM 호출과
+    quality_checker 재작성 루프까지 함께 절약합니다."""
+    if state.get("is_exit_early"):
+        return "exit_early"
+    return "generate_report"
+
+
 def should_call_tools(state: AgentState) -> str:
     """tool_agent_node 가 실행을 요청한 tool_calls 가 있으면 tool_executor 로,
     최종 대화 답변 작성이 완료되었으면 quality_checker 로 라우팅합니다."""
@@ -100,11 +112,6 @@ def build_agent_graph():
     workflow.add_edge("intent_classifier", "intent_parser")
     workflow.add_edge("intent_parser", "market_location_resolver")
     workflow.add_edge("safety_evaluator", "retriever")
-    # docent_generator/report_finalizer(당시 이름 local_recommender) 두 노드가 report_generator
-    # 하나로 통합되면서(2026-07-24), course_recommendation 의도만 도달하는 이 경로에 있던
-    # should_finalize_report 조건부 분기(둘 다 도달하면 사실상 항상 finalize 였음)가 불필요해져
-    # 고정 엣지로 단순화됨.
-    workflow.add_edge("retriever", "report_generator")
     workflow.add_edge("report_generator", "quality_checker")
     workflow.add_edge("quick_responder", "tool_agent")
     workflow.add_edge("tool_executor", "tool_agent")
@@ -116,6 +123,20 @@ def build_agent_graph():
         {
             "quick_response": "quick_responder",
             "full_pipeline": "safety_evaluator"
+        }
+    )
+
+    # 2-1-1. 무조건 반려(Fail-Fast): DB 매칭 코스가 0건이면 기획서를 생성하지 않고 반려 경로로.
+    # (2026-07-24~25 에는 retriever → report_generator 고정 엣지였습니다 — docent_generator/
+    # report_finalizer 통합 시 should_finalize_report 조건부 분기를 없애며 단순화한 것인데,
+    # 2026-07-25 무조건 반려 정책 도입으로 다시 조건부가 되었습니다. 판단 기준이 그때의
+    # intent_category(항상 참이라 무의미)와 달리 이번엔 실제 검색 결과라는 점이 다릅니다.)
+    workflow.add_conditional_edges(
+        "retriever",
+        route_after_retriever,
+        {
+            "exit_early": "quick_responder",
+            "generate_report": "report_generator"
         }
     )
 

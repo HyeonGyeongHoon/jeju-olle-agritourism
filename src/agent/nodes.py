@@ -75,6 +75,10 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
 8. concept_theme: 질문의 컨셉/테마 (예: "힐링", "평지 트레킹", "농가 체험", 없으면 null)
 9. target_audience: 질문에서 유추되는 주 타겟 고객층 ("family", "corporate", "healing", "senior", "active" 중 하나, 명시 없으면 "family")
 10. include_market_insights: 질문이 명시적으로 "빅데이터/통계/시장 데이터 빼줘" 등으로 제외를 요청하지 않는 한 true
+11. strict_single_crop: 사용자가 "당근만", "오직 마늘만", "감귤만을 활용한" 등과 같이 한정 조사
+    "~만"이나 부사 "오직"을 사용해 단 하나의 작물로만 리포트를 배타적으로 한정하려는 의도가
+    확실히 드러나면 true. 단순히 "당근 코스 기획서 써줘"처럼 작물을 지정만 했을 뿐 다른 작물을
+    배제한다는 명시적 표현이 없으면 false (기본값). 애매하면 false.
 
 [응답 포맷 (JSON 전용)]
 {
@@ -94,7 +98,8 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
   },
   "concept_theme": string or null,
   "target_audience": string,
-  "include_market_insights": boolean
+  "include_market_insights": boolean,
+  "strict_single_crop": boolean
 }"""
 
     try:
@@ -118,6 +123,7 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
             concept_theme=parsed.get("concept_theme"),
             target_audience=parsed.get("target_audience") or "family",
             include_market_insights=parsed.get("include_market_insights", True),
+            strict_single_crop=parsed.get("strict_single_crop", False),
         ).model_dump(mode="json")
     except Exception as e:
         print(f"[!] 의도 파싱 중 오류 발생: {e}. 기본 제약 조건으로 폴백합니다.")
@@ -486,28 +492,98 @@ def _crop_location_boost(chunk: Dict[str, Any], key_item_or_crop: str | None, pr
     return boost
 
 
-def _fetch_market_insight(client: Any, region_dong: str | None, target_month: int | None) -> Dict[str, Any] | None:
-    """제주관광공사 이동통신 빅데이터(visitor_analytics) 에서 해당 행정동·월의 방문객 통계를
-    조회합니다. `visitor_analytics` 테이블이 아직 적재되지 않았거나(Gate B 승인 대기 중) 조회에
-    실패해도 그래프 전체가 중단되지 않도록 예외를 삼키고 None 을 반환합니다. 같은 월이라도
-    연도가 여러 건 있을 수 있어 가장 최근 연도 값을 사용합니다.
+def _query_visitor_analytics_row(
+    client: Any, region_dong: str, target_month: int | None
+) -> Dict[str, Any] | None:
+    """visitor_analytics 에서 region_dong 표기 그대로(완전 일치) 한 행을 조회합니다.
+    `visitor_analytics` 테이블이 아직 적재되지 않았거나(Gate B 승인 대기 중) 조회에 실패해도
+    그래프 전체가 중단되지 않도록 예외를 삼키고 None 을 반환합니다.
     """
-    if not region_dong or not target_month:
-        return None
     try:
-        res = (
-            client.table("visitor_analytics")
-            .select("*")
-            .eq("region_dong", region_dong)
-            .like("year_month", f"%-{target_month:02d}")
-            .order("year_month", desc=True)
-            .limit(1)
-            .execute()
-        )
+        query = client.table("visitor_analytics").select("*").eq("region_dong", region_dong)
+        if target_month:
+            query = query.like("year_month", f"%-{target_month:02d}")
+        res = query.order("year_month", desc=True).limit(1).execute()
         return res.data[0] if res.data else None
     except Exception as e:
         print(f"[!] Market Insight(visitor_analytics) 조회 실패, 생략합니다: {e}")
         return None
+
+
+def _resolve_canonical_region_dong(client: Any, region_dong: str) -> str | None:
+    """visitor_analytics.region_dong 에 실제로 존재하는 표기 중, region_dong 과 읍/면/동 접미사
+    유무만 다른 값을 찾아 그 **정식 표기**를 반환합니다("한림" -> "한림읍").
+
+    `_filter_course_ids_by_location`(코스 매칭)은 이미 `_normalize_admin_tier_name` 으로 접미사를
+    떼고 비교해 "한림" == "한림읍" 을 허용하는데, 통계 조회만 `.eq()` 완전 일치로 남아 있어서
+    같은 질의에서 코스는 정상 매칭되고 Market Insight 만 0건이 되는 경계면 불일치가 있었습니다
+    (2026-07-25 라이브 QA: "한림 기획서 만들어줘" → intent_parser 가 preferred_location='한림'
+    으로 추출 → 한림읍 2026-05 방문객 559,007명 행이 실존하는데도 기획서에는 "관련 빅데이터
+    지표가 확인되지 않아 정성적으로 제안합니다"로 출력).
+
+    region_dong 컬럼 한 개만 전량 조회합니다 — visitor_analytics 는 월×행정동 단위라 규모가
+    작아(2026-07-25 기준 215행 / 고유 지역 43개) 전량 스캔이 과하지 않고, 정식 표기를 알아낸 뒤
+    기존 `.eq()` 조회 경로를 그대로 재사용할 수 있어 월 필터/정렬 로직을 중복 구현하지 않아도
+    됩니다.
+
+    정규화 결과가 같은 지역이 둘 이상이면 어느 지역의 통계인지 특정할 수 없으므로 **None 으로
+    fail-closed** 합니다 — 기획서에 그대로 인용되는 수치라서, 틀릴 수도 있는 지역의 통계를
+    붙이는 것보다 통계 없이 진행하는 게 안전합니다(`_resolve_stats_region_from_areas` 와 동일한
+    판단). 현재 데이터의 행정동/읍/면 43개는 접미사를 떼도 서로 충돌하지 않음을 확인했습니다.
+    """
+    try:
+        res = client.table("visitor_analytics").select("region_dong").execute()
+        available = {
+            str(row["region_dong"]).strip()
+            for row in (res.data or [])
+            if isinstance(row, dict) and row.get("region_dong")
+        }
+    except Exception as e:
+        print(f"[!] visitor_analytics.region_dong 목록 조회 실패, 지역명 정규화를 생략합니다: {e}")
+        return None
+
+    normalized = _normalize_admin_tier_name(region_dong.strip())
+    candidates = sorted(
+        value for value in available if _normalize_admin_tier_name(value) == normalized
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        print(
+            f"[!] '{region_dong}' 이(가) 여러 행정동({', '.join(candidates)})에 대응해 통계 지역을 "
+            f"특정할 수 없어 Market Insight 를 생략합니다."
+        )
+    return None
+
+
+def _fetch_market_insight(client: Any, region_dong: str | None, target_month: int | None) -> Dict[str, Any] | None:
+    """제주관광공사 이동통신 빅데이터(visitor_analytics) 에서 해당 행정동·월의 방문객 통계를
+    조회합니다. 같은 월이라도 연도가 여러 건 있을 수 있어 가장 최근 연도 값을 사용합니다.
+    target_month 가 없으면("최근 방문객 수는?" 처럼 질의가 특정 월을 지정하지 않은 경우) 월로
+    필터링하지 않고 해당 지역의 가장 최근 데이터를 그대로 반환합니다 — 예전엔 이 경우 바로 None을
+    반환했는데, 호출부(quick_responder_node)가 target_month 를 "오늘 날짜의 달"로 기본값
+    처리하고 있어서, DB에 적재된 데이터가 이번 달까지 커버하지 않으면(2026-07-25 라이브 QA: DB는
+    2026-05까지만 적재, 오늘은 2026-07) 실제로는 최근 데이터가 있는데도 "통계를 찾지 못했다"고
+    답하고, 그 실패가 quality_checker 재시도 루프까지 불필요하게 불러일으켰습니다.
+    region_dong 표기가 DB 값과 정확히 같으면(대부분의 경우) 예전과 똑같이 단 한 번만 조회하고,
+    0건일 때에만 `_resolve_canonical_region_dong` 으로 접미사 표기 차이("한림" vs "한림읍")를
+    해소해 정식 표기로 한 번 더 조회합니다(추가 조회는 실패 경로에서만 발생).
+    """
+    if not region_dong:
+        return None
+
+    row = _query_visitor_analytics_row(client, region_dong, target_month)
+    if row is not None:
+        return row
+
+    canonical = _resolve_canonical_region_dong(client, region_dong)
+    if not canonical or canonical == region_dong:
+        return None
+    print(
+        f"[i] Market Insight 지역명 '{region_dong}' 을(를) "
+        f"DB 정식 표기 '{canonical}' 로 해석했습니다."
+    )
+    return _query_visitor_analytics_row(client, canonical, target_month)
 
 
 def _crop_label_matches(
@@ -698,10 +774,44 @@ def _search_culture_knowledge(
     return culture_chunks_data
 
 
+def _build_fail_fast_result(
+    exit_reason: str, market_insight: Dict[str, Any] | None
+) -> Dict[str, Any]:
+    """무조건 반려(Fail-Fast) 정책의 retrieve_rag_node 조기 종료 반환값을 만듭니다
+    (2026-07-25 정책 전환). DB 매칭 코스가 0건인 순간, 그 뒤의 모든 검색(pgvector 유사도 검색,
+    culture_crop_knowledge 검색, course_sub_segments 조회)을 전면 중단하고 반려 사유만 실어
+    즉시 반환합니다 — 예전의 fail-soft 경로는 필터를 해제하고 전체 코스로 계속 진행해 유료
+    임베딩/LLM 호출을 모두 소비한 뒤, 결국 report_generator 가 같은 반려 메시지를 쓰거나
+    (더 나쁜 경우) 반려 메시지와 무관한 culture/market 컨텍스트를 quality_checker 가 대조하며
+    최대 3회의 재작성 루프를 도는 낭비가 있었습니다.
+
+    fallback_applied/fallback_reason 은 명시적으로 False/None 으로 돌려놓습니다. 이 두 필드는
+    "조건을 완화해서 계속 검색했다"는 각주용 신호인데, 이제 완화 자체를 하지 않으므로 여기서
+    켜지면 report_generator 가 잘못된 각주를 붙일 수 있습니다.
+    market_insight 는 이미 조회를 마친 값이라 그대로 실어 보냅니다(check_quality_node 가
+    is_exit_early 로 먼저 단락하므로 이 값이 검증 컨텍스트로 쓰이지는 않습니다).
+    """
+    print(f"[!] [무조건 반려] {exit_reason} (벡터/문화지식 검색을 실행하지 않고 즉시 종료)")
+    return {
+        "retrieved_chunks": [],
+        "culture_chunks": [],
+        "sub_segments": [],
+        "fallback_applied": False,
+        "fallback_reason": None,
+        "market_insight": market_insight,
+        "is_exit_early": True,
+        "exit_reason": exit_reason,
+    }
+
+
 def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     """RDB 메타 필터링과 pgvector 유사도 검색을 조합하여 관련 코스 정보를 조회하는 Retriever 노드입니다.
     올레 코스 정보와 별도로, 제주 밭담문화·작물 생육 지식 DB(culture_crop_knowledge)도
     함께 검색하여 문서 근거가 있는 도슨트 서사를 뒷받침합니다.
+    **(2026-07-25 정책 전환 — 무조건 반려/Fail-Fast)** target_course / preferred_location /
+    key_item_or_crop 세 필터 중 하나라도 매칭 0건이면, 그 조건만 해제하고 전체 코스에서 계속
+    검색하던 기존 fail-soft 동작을 폐지하고 그 자리에서 즉시 검색을 중단합니다
+    (`_build_fail_fast_result` 참고).
     """
     constraints = state["parsed_constraints"] or {}
     safety = state["safety_check"] or {}
@@ -738,67 +848,64 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     # RDB 기반 필터링 (완화 없이 1회만 단독 실행, 휠체어 등 hard_constraints 만 반영)
     course_ids = _execute_rdb_filtering(client, hard)
 
-    # B2B 성격상 B2C형 소프트 제약 및 Fallback 완화 로직은 제거됨 (기본값 설정)
+    # B2B 성격상 B2C형 소프트 제약 및 Fallback 완화 로직은 제거됨 (기본값 설정).
+    # 아래 세 필터도 2026-07-25 부터 무조건 반려(Fail-Fast)로 전환되어 이 두 값을 True/사유로
+    # 바꾸는 경로가 더는 없습니다. 필드 자체는 report_generator 가 여전히 읽으므로(각주 지시문)
+    # 정상 경로에서 False/None 을 그대로 내려보내기 위해 남겨 둡니다.
     fallback_applied = False
     fallback_reason = None
 
-    # target_course(질의에 특정 코스가 언급된 경우)도 지역/작물과 동일한 방식으로 처리합니다.
-    # 예전엔 이걸 _execute_rdb_filtering 안에서 courses.course_name 완전 일치(.eq())로 하드
-    # 필터링했는데, target_course 가 "1코스" 같은 정식 코스명이 아니라 "가파도"처럼 섬/지명으로
-    # 들어오면(라우터가 그렇게 추출할 수 있음) course_name 과 절대 일치하지 않아 후보가 0개가
-    # 되고, 그 뒤 벡터 검색조차 시도되지 않은 채 곧바로 "코스를 찾을 수 없다"는 완전 폴백으로
-    # 빠지는 문제가 있었습니다(2026-07-24 QA 시나리오 테스트에서 실제 재현: "가파도 코스로
-    # 기획서 만들어줘"). 겹치는 코스가 하나도 없으면 이 조건을 해제하고 전체에서 계속 진행하되
-    # 그 사실을 fallback_reason 으로 남깁니다.
+    # target_course(질의에 특정 코스가 언급된 경우) 필터. 예전엔 이걸 _execute_rdb_filtering
+    # 안에서 courses.course_name 완전 일치(.eq())로 하드 필터링했는데, target_course 가 "1코스"
+    # 같은 정식 코스명이 아니라 "가파도"처럼 섬/지명으로 들어오면(라우터가 그렇게 추출할 수 있음)
+    # course_name 과 절대 일치하지 않아 후보가 0개가 되는 문제가 있었습니다(2026-07-24 QA 재현:
+    # "가파도 코스로 기획서 만들어줘"). 이후 한동안은 조건을 해제하고 전체에서 계속 찾는
+    # fail-soft 였지만, 2026-07-25 무조건 반려 정책 전환으로 겹치는 코스가 0건이면 그 자리에서
+    # 검색을 중단하고 반려 사유만 돌려줍니다.
     if target_course and course_ids:
         course_ids, target_course_matched = _filter_course_ids_by_target_course(client, course_ids, target_course)
         if not target_course_matched:
-            fallback_applied = True
-            # target_course가 실존하는 코스인데 하드 제약(휠체어 등) 때문에 후보에서 빠진
-            # 경우("2코스는 존재하지만 휠체어 구간이 없음")는, target_course 자체가 DB에 없는
-            # 경우("가파도"처럼 정식 코스명이 아님)와 다르게 취급합니다. 후자는 사용자가 어떤
-            # 코스를 뜻했는지 애매하니 전체에서 계속 찾는 게 맞지만, 전자는 사용자가 지목한
-            # "그 코스"가 명확히 존재하는데 하드 제약을 못 만족하는 것이므로, 다른 코스로 조용히
-            # 대체 추천하지 않고 기획서 작성을 중단하여 이유만 정직하게 답합니다(사용자 요청).
+            # 사유 문구만 두 갈래로 구분합니다: target_course 가 실존하는 코스인데 하드 제약
+            # (휠체어 등) 때문에 후보에서 빠진 경우("2코스는 존재하지만 휠체어 구간이 없음")는
+            # 그 정확한 사유를 쓰고, target_course 자체가 DB에 없는 코스명인 경우("가파도")는
+            # 코스명을 찾지 못했다는 일반 사유를 씁니다. 어느 쪽이든 다른 코스로 조용히 대체
+            # 추천하지 않고 기획서 작성을 중단하는 것은 동일합니다.
             hard_constraint_reason = _describe_target_course_mismatch(client, target_course, hard)
-            if hard_constraint_reason:
-                course_ids = []
-                fallback_reason = hard_constraint_reason
-            else:
-                fallback_reason = (
-                    f"'{target_course}' 코스명과 직접 일치하는 코스를 찾지 못해, "
-                    f"해당 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
-                )
+            exit_reason = hard_constraint_reason or (
+                f"'{target_course}' 코스명과 직접 일치하는 코스를 찾지 못해 "
+                f"기획서를 생성할 수 없습니다."
+            )
+            return _build_fail_fast_result(exit_reason, market_insight)
 
     # 지역 조건(preferred_location)을 벡터 검색 이전에 실제 하드 필터로 반영합니다. 이게 없으면
     # 벡터 검색이 먼저 의미상 가장 비슷한 상위 몇 개만 뽑고 그 안에서만 지역 boost를 적용해,
     # 지역과 무관한 코스가 뽑히고도 Market Insight만 엉뚱하게 그 지역 통계를 보여주는 불일치가
     # 생길 수 있습니다(실사용 중 발견됨: "외국인 방문객 1위 지역" 통계는 A 지역인데 실제 추천 코스는
-    # 전혀 다른 B 지역인 경우). 겹치는 코스가 하나도 없으면 지역 조건을 해제하고 전체에서
-    # 검색하되, 그 사실을 fallback_reason 으로 남겨 리포트에 각주로 노출합니다.
+    # 전혀 다른 B 지역인 경우). 겹치는 코스가 하나도 없으면(2026-07-25 무조건 반려 정책) 지역
+    # 조건을 해제하고 전체에서 검색하지 않고 즉시 반려합니다.
     if preferred_location and course_ids:
         course_ids, location_matched = _filter_course_ids_by_location(client, course_ids, preferred_location)
         if not location_matched:
-            fallback_applied = True
-            fallback_reason = (
-                f"'{preferred_location}' 지역과 직접 겹치는 올레 코스를 찾지 못해, "
-                f"지역 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
+            return _build_fail_fast_result(
+                f"'{preferred_location}' 지역과 직접 겹치는 올레 코스를 찾지 못해 "
+                f"기획서를 생성할 수 없습니다.",
+                market_insight,
             )
 
     # key_item_or_crop(작물/테마)도 지역과 같은 이유로 벡터 검색 이전에 하드 필터로 반영합니다
     # (실사용 중 발견됨: "쪽파" 질의인데 벡터 검색 상위 후보에 쪽파 태그 코스가 없어 로컬
     # 추천에서 쪽파가 한 번도 조회되지 않던 문제). key_item_or_crop 은 "밭담"/"숲길" 같은
     # 비작물 테마어일 수도 있어(intent_parser 참고), courses.crops 에 실제로 등장하는 값일
-    # 때만 필터링하고, 아니면 조용히 건너뜁니다(테마 질의마다 완화 각주가 뜨지 않도록).
+    # 때만 필터링하고 아니면 조용히 건너뜁니다(_filter_course_ids_by_crop 이 그 경우 matched=True
+    # 를 반환) — 테마 질의가 반려되지 않도록 하는 이 구분은 무조건 반려 정책에서 더 중요해졌습니다.
     if key_item_or_crop and course_ids:
         course_ids, crop_matched = _filter_course_ids_by_crop(client, course_ids, key_item_or_crop)
         if not crop_matched:
-            fallback_applied = True
-            crop_reason = (
-                f"'{key_item_or_crop}' 작물과 직접 겹치는 올레 코스를 찾지 못해, "
-                f"작물 조건 없이 전체 코스 중 가장 적합한 코스를 추천합니다."
+            return _build_fail_fast_result(
+                f"'{key_item_or_crop}' 작물과 직접 겹치는 올레 코스를 찾지 못해 "
+                f"기획서를 생성할 수 없습니다.",
+                market_insight,
             )
-            fallback_reason = f"{fallback_reason} {crop_reason}" if fallback_reason else crop_reason
 
     # pgvector 유사도 기반 청크 추출
     chunks_data = []
@@ -834,6 +941,7 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
                         # NULL(None)인 경우는 그대로 None 을 반환해 float(None) 에서 TypeError 가
                         # 났었습니다 — "or 0.0" 으로 None/누락 둘 다 안전하게 처리합니다.
                         "total_distance_km": float(course_meta.get("total_distance_km") or 0.0),
+                        "estimated_time_hours": float(course_meta.get("estimated_time_hours") or 0.0),
                         "estimated_time_text": course_meta.get("estimated_time_text", ""),
                         "difficulty": course_meta.get("difficulty", "중"),
                         "title": item["title"],
@@ -891,7 +999,12 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         "sub_segments": sub_segments_data,
         "fallback_applied": fallback_applied,
         "fallback_reason": fallback_reason,
-        "market_insight": market_insight
+        "market_insight": market_insight,
+        # 정상 경로는 반려가 아님을 명시합니다. 재작성 루프(query_rewriter → retriever)로 이
+        # 노드에 재진입했을 때 이전 순회에서 켜진 플래그가 남아있으면, 이번엔 코스를 찾았는데도
+        # route_after_retriever 가 반려로 보내버립니다.
+        "is_exit_early": False,
+        "exit_reason": None,
     }
 
 
@@ -975,34 +1088,119 @@ def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict
     return None
 
 
+def _split_comma_tokens(raw: str | None) -> List[str]:
+    """쉼표 구분 컬럼(courses.administrative_areas / eup_myeon_dong_areas / crops 등)을
+    공백이 제거된 토큰 리스트로 변환합니다."""
+    return [token.strip() for token in (raw or "").split(",") if token.strip()]
+
+
+# _filter_course_ids_by_location 이 courses 에서 읽는 컬럼 목록. eup_myeon_dong_areas 는
+# 2026-07-25 에 추가된 컬럼(supabase/schema.sql 섹션 10)이고, 이 리포의 DDL은 Supabase SQL
+# 에디터에서 수동으로 실행해야 하므로 아직 ALTER 가 적용되지 않은 환경이 있을 수 있습니다.
+# 그 환경에서 조회가 통째로 실패하면(=지역 필터 0건 = 무조건 반려 정책상 즉시 반려) 모든 지역
+# 질의가 죽으므로, 실패 시 이 컬럼을 뺀 레거시 목록으로 한 번 더 조회해 예전 매칭 방식으로
+# 안전하게 강등됩니다.
+_LOCATION_SELECT_COLS = "id,administrative_areas,course_name,eup_myeon_dong_areas"
+_LOCATION_SELECT_COLS_LEGACY = "id,administrative_areas,course_name"
+
+# 읍/면/동 접미사. "한림"처럼 접미사를 생략해 말한 지역명도 "한림읍" 토큰과 매칭시키기 위해
+# 양쪽에서 이 접미사를 떼고 비교합니다. data/jeju_districts.csv 의 행정동/읍/면 이름 43개는
+# 접미사를 떼어도 서로 충돌하지 않음을 확인했습니다(2026-07-25) — 즉 이 관대함이 세화리류
+# 동명이인 충돌을 되살리지는 않습니다(예: "구좌읍"->"구좌" vs "표선면"->"표선").
+_ADMIN_TIER_SUFFIXES = ("읍", "면", "동")
+
+
+def _normalize_admin_tier_name(name: str) -> str:
+    """읍/면/동 접미사를 제거한 비교용 표기를 반환합니다("한림읍" -> "한림")."""
+    for suffix in _ADMIN_TIER_SUFFIXES:
+        if len(name) > 1 and name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _course_row_matches_location(row: Dict[str, Any], preferred_location: str) -> bool:
+    """코스 한 행이 preferred_location 과 겹치는지 계층적으로 판정합니다.
+
+    1) preferred_location 이 course_name 에 등장하면 매칭(기존 동작 유지 — 코스명이 지역
+       필드로 새어 들어온 경우는 상류에서 `_looks_like_course_name` 이 이미 걸러냅니다).
+    2) preferred_location 이 administrative_areas(법정리/법정동)의 토큰과 **완전 일치**하면
+       매칭 — 사용자가 법정리 이름 자체를 직접 지목한 경우("세화리")를 계속 지원합니다.
+       예전엔 부분 문자열 검사였는데, 완전 토큰 일치로 바꿔 "용담"이 "용담동"에 걸리는 식의
+       부분 매칭을 배제합니다.
+    3) 그 외(preferred_location 이 읍/면/동 단위 이름인 일반적인 경우)는 eup_myeon_dong_areas
+       토큰과의 완전 일치로만 판정합니다. **이게 이번 변경의 핵심**: 예전엔 읍/면 이름을
+       _ADMIN_DONG_TO_LEGAL_DONGS 로 법정리 후보로 역확장해 administrative_areas 에서 부분
+       문자열로 찾았는데, 같은 법정리 이름이 서로 다른 읍/면에 동시에 존재해서(예: "세화리"가
+       구좌읍과 표선면에 각각 존재) 엉뚱한 지역의 코스가 매칭됐습니다(라이브 재현 2026-07-25:
+       "구좌읍 감귤" 질의에 표선면/남원읍의 4코스가 "세화리" 충돌로 편입되고, 그 코스는 crops
+       에 감귤이 있어 작물 단계의 무조건 반려까지 우회해버림). 이 컬럼이 채워진 행은 소속
+       읍/면/동이 확정된 값이므로, 여기서 안 걸리면 그 코스는 그 지역 코스가 아닙니다.
+    4) eup_myeon_dong_areas 가 비어있는(NULL/빈 문자열 — 백필 전이거나 신규 추가된) 행에
+       한해서만 예전 법정리 역확장 매칭으로 폴백합니다. 과도기 방어용 경로입니다.
+    """
+    if preferred_location in (row.get("course_name") or ""):
+        return True
+
+    if preferred_location in _split_comma_tokens(row.get("administrative_areas")):
+        return True
+
+    eup_myeon_tokens = _split_comma_tokens(row.get("eup_myeon_dong_areas"))
+    if eup_myeon_tokens:
+        if preferred_location in eup_myeon_tokens:
+            return True
+        # 접미사를 생략한 표기("한림" = "한림읍")까지만 관대하게 허용합니다. 예전의 부분 문자열
+        # 매칭은 이 정도의 관대함을 사실상 제공했고, 무조건 반려 정책 아래에서는 이런 표기 차이가
+        # 곧바로 사용자에게 "코스를 찾지 못했다"는 반려로 나타나므로 이 경로만 남깁니다.
+        normalized = _normalize_admin_tier_name(preferred_location)
+        return any(
+            _normalize_admin_tier_name(token) == normalized for token in eup_myeon_tokens
+        )
+
+    legacy_candidates = {preferred_location} | set(
+        _ADMIN_DONG_TO_LEGAL_DONGS.get(preferred_location, [])
+    )
+    return any(
+        cand in (row.get("administrative_areas") or "") for cand in legacy_candidates
+    )
+
+
 def _filter_course_ids_by_location(
     client: Any, course_ids: List[int], preferred_location: str
 ) -> tuple[List[int], bool]:
     """course_ids 중 preferred_location(행정동/읍/면 단위 — 직접 지정이든 market_location_resolver
-    가 채운 것이든)과 실제로 겹치는 코스만 남깁니다. courses.administrative_areas 는 법정리/법정동
-    단위라 이름이 그대로 안 겹칠 수 있어(예: "안덕면"은 "화순리" 등으로만 저장됨),
-    _ADMIN_DONG_TO_LEGAL_DONGS 로 후보를 넓혀서 매칭합니다. 겹치는 코스가 하나도 없으면
+    가 채운 것이든)과 실제로 겹치는 코스만 남깁니다. 판정 규칙은
+    `_course_row_matches_location` 참고(2026-07-25 부터 courses.eup_myeon_dong_areas 컬럼 기반
+    완전 일치가 기본, 백필 전 행만 예전 법정리 역확장으로 폴백). 겹치는 코스가 하나도 없으면
     (완전 배제 대신) 원래 course_ids 를 그대로 반환하고 두 번째 반환값을 False 로 표시해,
-    호출부가 "지역 조건을 해제하고 검색했다"는 사유를 리포트에 남길 수 있게 합니다.
+    호출부가 그 사실을 처리할 수 있게 합니다(현재 retrieve_rag_node 는 이 경우 무조건 반려).
     """
     if not preferred_location or not course_ids:
         return course_ids, False
 
-    candidates = {preferred_location} | set(_ADMIN_DONG_TO_LEGAL_DONGS.get(preferred_location, []))
-
     try:
-        res = client.table("courses").select("id,administrative_areas,course_name").in_("id", course_ids).execute()
+        res = (
+            client.table("courses")
+            .select(_LOCATION_SELECT_COLS)
+            .in_("id", course_ids)
+            .execute()
+        )
     except Exception as e:
-        print(f"[!] 지역 필터링용 코스 조회 실패, 지역 조건 없이 진행합니다: {e}")
-        return course_ids, False
+        print(f"[!] 지역 필터링용 코스 조회 실패({_LOCATION_SELECT_COLS}), 레거시 컬럼으로 재시도합니다: {e}")
+        try:
+            res = (
+                client.table("courses")
+                .select(_LOCATION_SELECT_COLS_LEGACY)
+                .in_("id", course_ids)
+                .execute()
+            )
+        except Exception as e2:
+            print(f"[!] 지역 필터링용 코스 조회 재시도도 실패, 지역 조건 없이 진행합니다: {e2}")
+            return course_ids, False
 
     matched_ids = [
         row["id"]
         for row in (res.data or [])
-        if any(
-            cand in (row.get("administrative_areas") or "") or cand in (row.get("course_name") or "")
-            for cand in candidates
-        )
+        if _course_row_matches_location(row, preferred_location)
     ]
     if matched_ids:
         return matched_ids, True
@@ -1116,8 +1314,9 @@ def _build_market_insight_summary_str(market_insight: Dict[str, Any] | None) -> 
 
 
 _OUT_OF_SCOPE_DECLINE_MSG = (
-    "이 서비스는 개별 코스를 추천해 드리지 않고, 방문 시기·작물·지역·테마 조건에 맞춘 "
-    "B2B 관광 상품 기획서를 자동으로 작성해 드립니다. 코스 추천이 아니라 "
+    "죄송하지만 이 질문에는 답변드리기 어렵습니다. 이 서비스는 방문 시기·작물·지역·테마 "
+    "조건에 맞춰 제주 올레 코스의 B2B 관광 상품 기획서를 작성해 드리는 전용 서비스로, "
+    "개별 코스 추천이나 날씨·맛집 같은 일반 정보 안내는 제공하지 않습니다. "
     "'~코스로 기획서 만들어줘'처럼 요청해 주시면 도와드릴 수 있습니다."
 )
 
@@ -1134,7 +1333,19 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     요청하는 질문(예: "당근 코스 추천해줘"). 이 서비스는 코스 추천 자체를 제공하지 않으므로
     (사용자 요청: "코스 추천은 하지 않습니다"라고 명확히 예외 처리), 두 경우 모두 문화·작물
     지식이나 통계를 검색해 대신 답하지 않고 서비스 범위를 안내한 뒤 즉시 종료합니다.
+    **(2026-07-25 추가 — 무조건 반려/Fail-Fast)** retrieve_rag_node 가 DB 매칭 0건으로 검색을
+    중단했으면(is_exit_early) route_after_retriever 가 report_generator 대신 이 노드로 제어를
+    넘깁니다. 그 경우 이 노드는 반려 사유만 그대로 최종 답변으로 돌려주고, culture_crop_knowledge/
+    visitor_analytics 조회는 한 번도 하지 않습니다 — 반려 사유와 무관한 문화·통계 내용을 덧붙이면
+    "코스는 못 찾았지만 대신 이런 정보가 있다"는 식의 사실상 대체 추천이 되고, quality_checker 가
+    그 무관한 컨텍스트와 반려 메시지를 대조하며 재작성 루프를 돌게 됩니다.
     """
+    if state.get("is_exit_early"):
+        reason = state.get("exit_reason") or "요청하신 조건에 맞는 코스를 찾지 못했습니다."
+        # 문구는 generate_report_node 의 `if not chunks:` 반려 분기와 동일한 형태로 통일합니다.
+        msg = f"요청하신 조건으로는 기획서를 작성할 수 없습니다. {reason}"
+        return {"docent_answer": msg, "final_response": msg}
+
     if state.get("intent_category") == IntentCategory.OTHER.value:
         return {
             "culture_chunks": [],
@@ -1185,7 +1396,12 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
 
     market_insight = None
     if include_market_insights:
-        market_insight = _fetch_market_insight(client, preferred_location, target_month)
+        # target_month(위에서 today() 로 기본값 처리된 값)를 그대로 넘기지 않고 질의가 실제로
+        # 지정한 월(b2b_params 원본, 없으면 None)만 넘깁니다 — "최근 방문객 수는?"처럼 월이
+        # 없는 질의에서 "오늘 날짜의 달"을 강제하면, DB 적재 범위가 이번 달까지 아닐 때 실제로는
+        # 최근 데이터가 있는데도 조회가 0건으로 실패합니다. None 이면 _fetch_market_insight 가
+        # 월 필터 없이 해당 지역의 최신 데이터를 가져옵니다.
+        market_insight = _fetch_market_insight(client, preferred_location, b2b_params.get("target_month"))
 
     culture_context_str = _build_culture_context_str(culture_chunks, target_month)
     if not culture_context_str:
@@ -1337,7 +1553,16 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
     "other"를 이 검사 없이 그대로 통과시키면 quick_responder_node 의 범위 안내 결정을 무시하고
     엉뚱하게 그 작물/지역 정보를 검색해 실질적으로 "코스 추천"에 가까운 답을 다시 생성해버립니다
     (사용자 요청으로 발견: "당근 코스 추천해줘"). 그래서 "other"는 도구 호출 없이 그대로 종료합니다.
+    **(2026-07-25 추가 — 무조건 반려/Fail-Fast)** is_exit_early 도 같은 이유로 조기 종료 대상입니다.
+    quick_responder_node 가 만든 반려 메시지("...기획서를 작성할 수 없습니다")를, b2b_params 에
+    그대로 남아있는 preferred_location/key_item_or_crop 때문에 이 노드가 통계·작물 도구를 재호출해
+    덮어쓰면 반려가 대체 정보 안내로 변질됩니다. 이 두 검사는 반드시 아래 pending_tool_calls 계산
+    **보다 먼저** 있어야 합니다(has_grounded_answer 검사가 그 뒤에 있어 죽은 코드가 됐던 과거
+    버그와 동일한 함정 — 반려 케이스는 곧 필터 값이 b2b_params 에 살아있는 케이스입니다).
     """
+    if state.get("is_exit_early") and not (state.get("tool_outputs") or []):
+        return {"tool_calls": None}
+
     if state.get("intent_category") == IntentCategory.OTHER.value and not (state.get("tool_outputs") or []):
         return {"tool_calls": None}
 
@@ -1388,10 +1613,11 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
 
     # 3. max depth (3회) 도달 시 방어 조치: 더 이상 도구를 부르지 못하게 제한
     if depth >= 3:
-        system_prompt = """당신은 제주 문화·작물 지식 및 관광 통계를 친절히 안내하는 전문 챗봇입니다.
+        system_prompt = """당신은 제주올레 B2B 관광 상품 기획을 지원하는 도슨트 어시스턴트입니다. 답변 대상은
+직접 여행하는 관광객이 아니라, 이 데이터를 상품 기획서에 활용할 지자체 담당자/여행사 기획자입니다.
 도구 호출 한도에 도달했으므로, 현재까지 확보된 [실행된 도구 조회 결과]만을 바탕으로 사용자의 질문에
-가장 정확하고 친절하게 답변하세요. 도구가 반환한 에러 가이드(가용 월/지역 옵션 등)가 있다면
-사용자에게 그대로 친절히 안내하세요."""
+가장 정확하게 답변하세요. 도구가 반환한 에러 가이드(가용 월/지역 옵션 등)가 있다면 그대로 안내하되,
+"여유 있게 일정을 짜보세요", "즐거운 여행 되세요" 같은 관광객 대상 여행 조언·감성 멘트는 넣지 마세요."""
         user_msg = f"사용자 질문: {query}\n{feedback_note}{course_scope_note}{tools_context_str}"
         answer = get_chat_completion(system_prompt, user_msg)
         result = {
@@ -1413,10 +1639,39 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         key_crop = b2b_params.get("key_item_or_crop")
         market_query = b2b_params.get("market_location_query") or {}
 
+        # 도구를 큐잉하기 전에 먼저 확인합니다: quick_responder_node 가 이미 이 질의의 근거
+        # (course_meta/culture_chunks/market_insight)를 확보해 grounded 답변을 만들어뒀다면,
+        # preferred_location/key_item_or_crop 이 여전히 남아있다는 이유만으로 도구를 재호출해
+        # 그 답을 덮어쓰면 안 됩니다. **이 검사는 반드시 아래 pending_tool_calls 계산보다
+        # 먼저 와야 합니다** — quick_responder 가 뭔가를 찾아낸 케이스는 애초에 그 조회에 쓴
+        # preferred_location/key_item_or_crop 이 b2b_params 에 그대로 남아있으므로, 이 검사가
+        # pending_tool_calls 의 조기 return 뒤에 있으면 grounded 케이스에서 사실상 도달 불가능한
+        # 죽은 코드가 됩니다(2026-07-25 라이브 QA로 발견 — "구좌읍 3월 방문객 수는?"에서
+        # quick_responder 가 이미 정확히 조회해둔 3월 값을 무시하고 재호출해, 아래 ym 계산이
+        # market_location_query 에만 의존하는 탓에 월 정보를 잃고 도구가 최신월(5월)로 기본
+        # 폴백한 값으로 답을 덮어씀 + "가상 데이터" 문구까지 섞여 나오는 이중 오류였습니다).
+        has_grounded_answer = bool(
+            state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
+        )
+        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
+            return {"tool_calls": None}
+
         pending_tool_calls = []
         if market_query.get("metric") or preferred_loc:
             loc = preferred_loc or "성산읍"
-            ym = f"{market_query.get('year')}-{market_query.get('month'):02d}" if market_query.get("year") and market_query.get("month") else None
+            # market_location_query(연/월)이 없으면 일반 질의가 직접 지정한 target_month로
+            # 보완합니다(연도가 없으면 올해로 간주 - resolve_market_location_node와 동일 관례).
+            # 이게 없으면 "OO동 3월 방문객 수는?"처럼 target_month만 있는 질의가 이 경로를 타게
+            # 됐을 때(quick_responder가 못 찾은 예외 케이스) year_month=None으로 호출되어 도구가
+            # 최신월로 조용히 대체해버립니다.
+            year = market_query.get("year")
+            month = market_query.get("month") or b2b_params.get("target_month")
+            if year and month:
+                ym = f"{year}-{month:02d}"
+            elif month:
+                ym = f"{date.today().year}-{month:02d}"
+            else:
+                ym = None
             pending_tool_calls.append({
                 "name": "retrieve_visitor_statistics_tool",
                 "args": {
@@ -1434,29 +1689,17 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         if pending_tool_calls:
             return {"tool_calls": pending_tool_calls}
 
-        # 호출할 도구도 없고 이미 확보된 도구 결과도 없으면, 이 노드가 새로 알아낸 정보는
-        # 아무것도 없습니다. 그런데도 아래에서 재답변을 생성하면 컨텍스트가 텅 빈 상태로
-        # LLM 에 질문만 던지게 되어, quick_responder_node 가 DB 근거(코스 실측치/문화지식/통계)로
-        # 만들어 둔 답변을 근거 없는 일반 지식 답변으로 덮어씁니다(2026-07-25 발견).
-        # 근거가 하나라도 있었던 답변은 그대로 유지합니다. 반대로 근거가 아무것도 없어서
-        # quick_responder 가 "찾지 못했습니다"로 끝낸 경우는 기존 동작(일반 지식 재답변)을
-        # 유지합니다 — 그 경로의 동작 변경은 이번 수정 범위가 아닙니다. 품질 재시도 경로도
-        # loop_count 증가가 필요하므로(무한 루프 방지) 아래 재생성 로직을 그대로 타게 둡니다.
-        has_grounded_answer = bool(
-            state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
-        )
-        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
-            return {"tool_calls": None}
-
     # 도구 결과를 바탕으로 답변 생성
-    system_prompt = """당신은 제주 올레길 탐방객과 기획자를 위한 친절하고 명확한 도슨트 챗봇입니다.
+    system_prompt = """당신은 제주올레 B2B 관광 상품 기획을 지원하는 도슨트 어시스턴트입니다. 답변 대상은
+직접 여행하는 관광객이 아니라, 이 데이터를 상품 기획서에 활용할 지자체 담당자/여행사 기획자입니다.
 아래 [실행된 도구 조회 결과]를 바탕으로 자연스러운 문단으로 답변하세요.
 
 [절대 규칙]
 1. 도구 조회 결과에 명시된 수치와 단위(명, %, 톤 등)를 절대로 변경하거나 지어내지 마세요.
 2. 도구 결과가 [오류] 또는 [안내] 메시지(미지원 지역/기간 및 가용 옵션 목록)일 경우, 사용자가 다른 유효 옵션을 선택할 수 있도록 대안 목록을 친절하게 되물어 안내하세요. 단, [대상 코스]가 지정된 질문에서는 이 안내를 다른 코스·지역 추천으로 바꾸지 말고, [주의] 지시를 우선하세요.
-3. 2문단 이내로 간결하고 친근하게 작성하세요.
-4. [대상 코스 DB 실측 메타데이터]가 주어졌다면 코스의 난이도·소요시간·적합성 판단은 반드시 그 수치를 인용해 말하고, 없는 수치는 "확인되지 않았다"고 밝히세요."""
+3. 2문단 이내로 간결하게 작성하세요.
+4. [대상 코스 DB 실측 메타데이터]가 주어졌다면 코스의 난이도·소요시간·적합성 판단은 반드시 그 수치를 인용해 말하고, 없는 수치는 "확인되지 않았다"고 밝히세요.
+5. "여유 있게 일정을 짜보세요", "즐거운 여행 되세요" 같은 관광객 대상 여행 조언·감성 멘트는 넣지 마세요. 대신 그 수치가 상품 기획에 시사하는 바(성수기 여부, 운용 인원/시간대 조정 필요성 등)를 기획자 관점으로 짧게 덧붙이는 것은 괜찮습니다."""
 
     user_msg = f"사용자 질문: {query}\n{feedback_note}{course_scope_note}{tools_context_str}"
     answer = get_chat_completion(system_prompt, user_msg)
@@ -1470,6 +1713,121 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         result["loop_count"] = loop_count + 1
     return result
 
+
+
+# 예상 1인 단가 범위 산정 상수 — 코드베이스/DB 어디에도 실제 도슨트 투어 요금표가 없어 전부
+# 가정값입니다(2026-07-25, 사용자 확인 완료). 시간당 해설비·고정비·난이도 배수는 "코스 1회 운용"
+# 단위(그룹 전체) 비용이고, 로컬 체험 add-on 은 참가자 개인이 소비하는 항목이라 이미 1인 단가
+# 성격이라는 점이 이 산식의 핵심 구분입니다 — 그룹 비용을 그대로 1인 단가로 부르면 과대 산정됩니다.
+_PRICE_BASE_FLAT = 10_000
+_PRICE_BASE_RATE_PER_HOUR = 15_000
+_PRICE_DIFFICULTY_MULTIPLIER = {"하": 1.0, "중": 1.15, "상": 1.3}
+_PRICE_ADDON_PER_COMBO = 3_000
+_PRICE_ADDON_MAX_COMBOS = 3
+_PRICE_GROUP_SIZE_BY_AUDIENCE = {
+    "family": 4,
+    "healing": 2,
+    "active": 6,
+    "senior": 10,
+    "corporate": 15,
+}
+_PRICE_AUDIENCE_LABEL = {
+    "family": "가족",
+    "healing": "힐링",
+    "active": "액티브",
+    "senior": "시니어",
+    "corporate": "기업",
+}
+
+
+def _compute_price_breakdown(
+    course: Dict[str, Any], target_audience: str, num_local_combos: int
+) -> Dict[str, Any]:
+    """예상 1인 단가 산정의 모든 중간값을 계산합니다. `_estimate_price_range`(최종 범위 문자열)와
+    `_build_price_breakdown_str`(가독성 있는 산정 근거 텍스트)이 같은 계산을 두 번 하지 않도록
+    공유하는 내부 헬퍼입니다. estimated_time_hours 가 없거나 0 이하인 결측 데이터는 계산을
+    포기하지 않고 difficulty 배수만으로 최소한의 해설비가 반영되도록 1시간으로 간주합니다(fail-soft).
+    """
+    hours = course.get("estimated_time_hours") or 1.0
+    difficulty = course.get("difficulty") or "중"
+    difficulty_mult = _PRICE_DIFFICULTY_MULTIPLIER.get(difficulty, _PRICE_DIFFICULTY_MULTIPLIER["중"])
+    group_size = _PRICE_GROUP_SIZE_BY_AUDIENCE.get(target_audience, _PRICE_GROUP_SIZE_BY_AUDIENCE["family"])
+    combos_used = min(num_local_combos, _PRICE_ADDON_MAX_COMBOS)
+
+    guide_cost = hours * _PRICE_BASE_RATE_PER_HOUR * difficulty_mult
+    group_cost = _PRICE_BASE_FLAT + guide_cost
+    per_person_group_cost = group_cost / group_size
+    addon_total = combos_used * _PRICE_ADDON_PER_COMBO
+    per_person = per_person_group_cost + addon_total
+
+    return {
+        "hours": hours,
+        "difficulty": difficulty,
+        "difficulty_mult": difficulty_mult,
+        "target_audience": target_audience,
+        "group_size": group_size,
+        "combos_used": combos_used,
+        "guide_cost": guide_cost,
+        "group_cost": group_cost,
+        "per_person_group_cost": per_person_group_cost,
+        "addon_total": addon_total,
+        "per_person": per_person,
+        "low": round(per_person * 0.9 / 1_000) * 1_000,
+        "high": round(per_person * 1.15 / 1_000) * 1_000,
+    }
+
+
+def _estimate_price_range(course: Dict[str, Any], target_audience: str, num_local_combos: int) -> str:
+    """대표 코스(course)의 실측 소요시간/난이도와 로컬 제휴 조합 수를 근거로 예상 1인 단가
+    범위를 결정론적으로 계산합니다. 실제 요금 데이터가 없어 가정값 기반이지만, 매 실행마다
+    LLM 이 임의로 지어내던 것과 달리 같은 조건이면 항상 같은 범위를 반환합니다.
+    """
+    b = _compute_price_breakdown(course, target_audience, num_local_combos)
+    return f"{b['low']:,}원 ~ {b['high']:,}원"
+
+
+def _build_price_breakdown_str(course: Dict[str, Any], target_audience: str, num_local_combos: int) -> str:
+    """단가 산정 근거를 기획서 독자(지자체 담당자/여행사 기획자)가 바로 이해할 수 있도록,
+    "시간×단가×난이도배수 → 그룹 비용 → 인원 분담 → 로컬 체험 add-on → 최종 범위" 순서의
+    들여쓴 하위 목록 텍스트로 만듭니다. LLM 에게 이 근거를 설명하라고 맡기지 않고 그대로
+    옮겨 적게 하는 것은, 계산식 자체는 매번 동일해야 하는 사실 데이터이기 때문입니다.
+    """
+    b = _compute_price_breakdown(course, target_audience, num_local_combos)
+    audience_label = _PRICE_AUDIENCE_LABEL.get(target_audience, "가족")
+    lines = [
+        f"  - 도슨트 해설비: {b['hours']:g}시간 × {_PRICE_BASE_RATE_PER_HOUR:,}원 × "
+        f"난이도 배수({b['difficulty']}) {b['difficulty_mult']:g} = {round(b['guide_cost']):,}원",
+        f"  - 그룹 고정비: {_PRICE_BASE_FLAT:,}원 → 그룹 비용 합계 {round(b['group_cost']):,}원 "
+        f"({audience_label} 단위 {b['group_size']}인 기준)",
+        f"  - 1인 분담액: {round(b['group_cost']):,}원 ÷ {b['group_size']}인 = "
+        f"{round(b['per_person_group_cost']):,}원",
+        f"  - 로컬 체험 연계 {b['combos_used']}건 × {_PRICE_ADDON_PER_COMBO:,}원 = "
+        f"{round(b['addon_total']):,}원",
+        f"  - 1인 단가(중간값) {round(b['per_person']):,}원 → 최종 범위(±10~15%) "
+        f"{b['low']:,}원 ~ {b['high']:,}원",
+    ]
+    return "\n".join(lines)
+
+
+def _resolve_effective_crops(chunk: Dict[str, Any], b2b_params: Dict[str, Any]) -> List[str]:
+    """1순위 코스(chunk)의 재배작물 목록 중, 로컬 제휴 추천/단가 산정에 실제로 반영할 작물
+    목록을 결정합니다. 사용자가 "당근만"/"오직 마늘만"처럼 배타적으로 단일 작물을 지정한
+    경우(`strict_single_crop=True`) 그 코스의 다른 공동 재배 작물(예: 감자, 무)을 완전히
+    제외하고 타겟 작물 1종으로만 강제 제한합니다.
+
+    단, `key_item_or_crop`이 이 코스의 실제 crops 목록에 없다면(사용자가 착각했거나, 이 코스에서
+    실제로는 재배되지 않는 작물을 지정한 경우) 이 가드를 적용하지 않고 원래 crops 목록을 그대로
+    반환합니다(fail-soft) — 존재하지 않는 작물로 강제 필터링하면 combos 가 0건이 되어 로컬 제휴
+    아이디어/단가 산정 섹션 전체가 망가지므로, "겹치는 게 없으면 조건을 풀고 계속 진행"하는
+    지역/작물 필터와 동일한 원칙을 적용합니다(하드 제약이 아니라 검색 범위를 좁히는 사용자
+    선호 조건이므로 fail-closed 로 전체 리포트를 반려할 대상이 아님).
+    """
+    crops = [c.strip() for c in chunk.get("crops", "").split(",") if c.strip()]
+    strict_single_crop = bool(b2b_params.get("strict_single_crop"))
+    target_crop = (b2b_params.get("key_item_or_crop") or "").strip()
+    if strict_single_crop and target_crop and target_crop in crops:
+        return [target_crop]
+    return crops
 
 
 def generate_report_node(state: AgentState) -> Dict[str, Any]:
@@ -1513,11 +1871,23 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
             fallback_msg = "죄송합니다. 요청하신 조건(코스/작물/시기)에 부합하는 제주올레길 코스 데이터를 데이터베이스에서 찾을 수 없었습니다. 입력 조건을 다시 확인해 주세요."
         return {"docent_answer": fallback_msg, "final_response": fallback_msg}
 
-    # 코스 컨텍스트 빌드
+    # 코스 컨텍스트 빌드. 여러 코스가 함께 검색되더라도 섹션 1·2가 실제로 상품화하는 대상은
+    # 항상 chunks[0](유사도 순위 최상위 매칭 코스 — price_range_str/course_name 등 다른 계산도
+    # 전부 chunks[0] 기준)뿐입니다. 각 코스 블록에 "이 코스의 재배작물/행정구역" 형태로 소속을
+    # 문장 단위까지 명시하고 코스 1에는 별도 역할 라벨을 붙여, LLM이 코스 2 이후의 crops를 코스
+    # 1 얘기인 것처럼 자유 연상으로 섞어 쓰지 않도록 구조적으로 고정합니다(회귀 방지: 예전엔
+    # 코스명과 crops 목록이 근접 배치만 되어 있어 상위 매칭이 아닌 다른 코스의 crops가 상품
+    # 설명에 잘못 귀속되는 사례가 실사용 중 확인됨 — 예: 최상위 매칭 15-B코스(crops=마늘)에
+    # 14코스의 crops(감귤/양배추)가 서술됨).
     context_str = ""
     for i, c in enumerate(chunks):
-        context_str += f"\n[코스 {i+1}]: {c['course_name']} (거리: {c['total_distance_km']}km, 소요시간: {c['estimated_time_text']}, 난이도: {c['difficulty']})\n"
-        context_str += f"재배작물: {c['crops']}, 경유 행정구역: {c['administrative_areas']}\n"
+        role_label = (
+            "★ 최상위 매칭 코스 - 이번 상품 기획서가 실제로 상품화하는 유일한 대상"
+            if i == 0
+            else "참고용 코스 (상품화 대상이 아님 - 아래 최상위 매칭 코스 서술에 이 코스의 정보를 섞지 말 것)"
+        )
+        context_str += f"\n[코스 {i+1} - {role_label}]: {c['course_name']} (거리: {c['total_distance_km']}km, 소요시간: {c['estimated_time_text']}, 난이도: {c['difficulty']})\n"
+        context_str += f"※ {c['course_name']}의 재배작물: {c['crops']} / {c['course_name']}의 경유 행정구역: {c['administrative_areas']}\n"
         context_str += f"내용: {c['content']}\n"
 
     # 밭담문화·작물 생육 지식 DB 컨텍스트 빌드 (외부 API 대신 문서 근거 확보)
@@ -1599,6 +1969,48 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     else:
         location_resolution_str = "(해당 없음 - 사용자가 지역을 직접 지정했거나 지역 조건이 없는 질의)"
 
+    # 예상 1인 단가 범위 산정에 필요한 작물×행정구역 조합 수를 미리 세어둡니다(섹션 3의 비짓제주
+    # API 조회용 unique_combos 와 동일한 조합 집합이지만, 가격 산정은 조합 "개수"만 필요하고
+    # API 응답 내용은 필요 없으므로 여기서는 API 호출 없이 개수만 계산합니다 — 실제 조합 리스트/
+    # API 조회는 섹션 3에서 그대로 재사용합니다). 섹션 3이 1순위 코스(chunks[0])로만 제한되므로
+    # 여기서도 반드시 chunks[0]만 세야 합니다 — 그렇지 않으면 검색된 다른 코스의 조합까지 단가에
+    # 반영되어, 실제로 섹션 3에 나오지 않는 조합 수를 근거로 가격이 산정되는 불일치가 생깁니다.
+    # strict_single_crop(예: "당근만"/"오직 마늘만") 이면 이 코스의 다른 공동 재배 작물은
+    # 단가 산정 조합 수/로컬 제휴 조회/아이디어 프롬프트에서 모두 동일하게 제외합니다 —
+    # 이 노드 뒷부분(unique_combos, 로컬 제휴 아이디어 프롬프트)에서도 재사용하는 값이라
+    # chunks[0]/b2b_params 가 바뀌지 않는 이 함수 안에서는 한 번만 계산합니다.
+    _effective_top_course_crops = _resolve_effective_crops(chunks[0], b2b_params)
+    _price_combo_set = set()
+    for crop in _effective_top_course_crops:
+        for area in [x.strip() for x in chunks[0]["administrative_areas"].split(",") if x.strip()]:
+            _price_combo_set.add((crop, area))
+    price_range_str = _estimate_price_range(chunks[0], target_audience, len(_price_combo_set))
+    price_breakdown_str = _build_price_breakdown_str(chunks[0], target_audience, len(_price_combo_set))
+
+    # strict_single_crop 이 실제로 적용된 경우(타겟 작물이 코스 1의 실제 crops 목록에 있어
+    # _resolve_effective_crops 가 단일 작물로 좁혔을 때)에만, 섹션 1·2 작성 LLM에게 다른 작물을
+    # 일절 언급하지 말라는 절대 규칙을 추가로 지시합니다. 대상 작물이 이 코스에서 재배되지
+    # 않아 가드가 적용되지 않은 경우(fail-soft)는 이 지시도 함께 생략합니다 — 지시만 내리고
+    # 실제 데이터 필터링은 하지 않으면 "왜 코스 1의 crops 에 있는 다른 작물을 숨기라는 거냐"는
+    # 모순이 생기므로, 이 지시는 항상 _resolve_effective_crops 의 실제 판단과 함께 움직여야 합니다.
+    _strict_single_crop_target = (b2b_params.get("key_item_or_crop") or "").strip()
+    strict_single_crop_applied = (
+        bool(b2b_params.get("strict_single_crop"))
+        and bool(_strict_single_crop_target)
+        and _effective_top_course_crops == [_strict_single_crop_target]
+    )
+    if strict_single_crop_applied:
+        strict_single_crop_rule_str = (
+            f"5. 사용자가 \"{_strict_single_crop_target}만\"/\"오직 {_strict_single_crop_target}만\" 처럼 "
+            f"이번 상품을 \"{_strict_single_crop_target}\" 단일 작물로만 배타적으로 한정해 달라고 "
+            f"요청했습니다. [코스 1]의 실제 재배작물 목록에 다른 작물이 더 있더라도, 섹션 1(상품명/"
+            f"USP/Market Insight 서술)과 섹션 2(타임라인 해설)에서 \"{_strict_single_crop_target}\" 이외의 "
+            f"작물은 이름조차 언급하거나 암시하지 마세요 — 상품명/USP/타임라인 포인트 모두 "
+            f"\"{_strict_single_crop_target}\" 단일 테마로만 서술하세요."
+        )
+    else:
+        strict_single_crop_rule_str = ""
+
     system_prompt = f"""당신은 제주도 지자체 담당자 및 여행사 상품 기획자에게 제출할 '제주 영농-관광 상생 상품 기획서'를 작성하는 B2B 리포트 작성 전문가입니다.
 줄글 위주의 가이드북/블로그 서술을 금지하고, 대화체 인사말이나 구어체("~해요", "안녕하세요" 등) 없이 아래 규격을 엄격히 준수한
 표(Table) 중심의 실무 보고서 형태 Markdown 만 출력하세요.
@@ -1620,16 +2032,21 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
 - 주 타겟 고객층: {target_audience} → 강조할 지표: {emphasis_instruction or "(없음 - 정성적 제안만)"}
 - 지역 자동 선정 근거: {location_resolution_str}
 
+[산정된 예상 1인 단가 범위 및 산정 근거 (직접 추정하지 말고 아래 내용을 그대로 사용)]
+- 최종 범위: {price_range_str}
+- 산정 근거(하위 목록, 그대로 옮겨 적을 것):
+{price_breakdown_str}
+
 [출력 규격 - 반드시 이 순서와 헤더를 그대로 사용]
 
 ## 1. 📊 B2B 상품 개요 & 스펙
 - **상품명**: (대상 코스명과 매개 작물/테마를 조합한 직관적 B2B 상품명)
 - **상품 타겟**: (예상 타겟 고객군 제안, 예: "3040 힐링 트레커", "로컬 푸드 관심 단체/가족")
 - **권장 운용 시간**: (코스 거리/난이도 기반 현실적인 운용 시간대 제안, 예: "08:00~13:00")
-- **예상 1인 단가 범위**: (도슨트 해설 + 로컬 체험 패키지를 가정한 합리적 가격대 제안)
+- **예상 1인 단가 범위**: 위 [산정된 예상 1인 단가 범위 및 산정 근거]의 "최종 범위" 값을 그대로 출력한 다음, 바로 아래 줄에 "산정 근거"의 하위 목록 5줄을 들여쓰기(각 줄 앞 "  -")까지 그대로 옮겨 적으세요. 숫자나 표현을 바꾸거나 요약하지 마세요.
 - **핵심 셀링 포인트 (USP)**: (한 줄 요약)
 - **[Market Insight (제주관광공사 빅데이터 연계)]**: 위 [제주관광공사 이동통신 빅데이터] 컨텍스트를 근거로 방문객 수/증감률과, "강조할 지표"로 지정된 항목을 한 문장으로 요약하세요. 컨텍스트가 "(빅데이터 지표 없음...)"이면 이 항목에 "관련 빅데이터 지표가 확인되지 않아 정성적으로 제안합니다"라고만 쓰고 수치를 지어내지 마세요. "지역 자동 선정 근거"가 "(해당 없음...)"이 아니라면, 이 지역이 왜 선택되었는지(어떤 통계 기준 몇 위)를 이 항목에 반드시 포함하세요.
-- 위 5개 항목(상품명~USP)은 확정된 사실이 아니라 기획 단계의 제안값이지만, Market Insight 항목은 반드시 컨텍스트에 있는 실제 수치만 인용하세요.
+- 상품명/상품 타겟/권장 운용 시간/USP 4개 항목은 확정된 사실이 아니라 기획 단계의 제안값입니다. 반면 예상 1인 단가 범위와 Market Insight 항목은 컨텍스트에 주어진 값을 반드시 그대로 인용하세요(직접 추정 금지).
 
 ## 2. 📍 [타임라인/동선 연계] 로컬 영농 & 문화 도슨트 포인트
 - 아래 표로만 작성하세요 (줄글 설명 금지):
@@ -1651,8 +2068,10 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
 
 [작성 원칙]
 1. 섹션 헤더(## 1. ~, ## 2. ~)는 반드시 그대로 출력하세요.
-2. 코스 거리/시간/난이도/구간 km, Market Insight 방문객 수치 등 컨텍스트에 있는 사실 수치를 지어내지 마세요. (단, 섹션 1의 상품명/타겟/시간/단가/USP는 애초에 사실 데이터가 아닌 기획 제안값이므로 예외)
-3. Markdown 표 문법이 깨지지 않도록 각 셀에 줄바꿈 없이 작성하세요."""
+2. 코스 거리/시간/난이도/구간 km, Market Insight 방문객 수치, 예상 1인 단가 범위 등 컨텍스트에 있는 사실/산정값을 지어내지 마세요. (단, 섹션 1의 상품명/타겟/운용시간/USP는 애초에 사실 데이터가 아닌 기획 제안값이므로 예외)
+3. Markdown 표 문법이 깨지지 않도록 각 셀에 줄바꿈 없이 작성하세요.
+4. [검색 결과 컨텍스트]에 코스가 여러 개 포함되어 있어도, 섹션 1(상품명/USP 등)과 섹션 2(타임라인)가 상품화하는 대상은 반드시 "★ 최상위 매칭 코스"로 표시된 [코스 1] 하나뿐입니다. 재배작물/경유 행정구역을 언급할 때는 반드시 [코스 1] 블록에 "이 코스의 재배작물/행정구역"으로 명시된 값만 사용하세요. [코스 2] 이후의 "참고용 코스"에 적힌 재배작물/행정구역을 [코스 1]의 것처럼 가져다 쓰지 마세요 — 참고용 코스는 상품화 대상이 아닙니다.
+{strict_single_crop_rule_str}"""
 
     user_msg = f"[질문(방문 조건)]: {query}\n\n[검색 결과 컨텍스트]:\n{context_str}"
 
@@ -1676,8 +2095,9 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     # 병렬화할 필요가 없습니다.
     unique_combos = []
     seen_combos = set()
-    for chunk in chunks:
-        crops = [c.strip() for c in chunk["crops"].split(",") if c.strip()]
+    if chunks:
+        chunk = chunks[0]
+        crops = _effective_top_course_crops
         areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
         for crop in crops:
             for area in areas:
@@ -1699,8 +2119,9 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
                     print(f"[!] 비짓제주 API 조회 실패(작물={combo[0]}, 지역={combo[1]}), 이 조합은 건너뜁니다: {e}")
                     rec_cache[combo] = []
 
-    for chunk in chunks:
-        crops = [c.strip() for c in chunk["crops"].split(",") if c.strip()]
+    if chunks:
+        chunk = chunks[0]
+        crops = _effective_top_course_crops
         areas = [a.strip() for a in chunk["administrative_areas"].split(",") if a.strip()]
 
         for crop in crops:
@@ -1733,7 +2154,10 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
   일반화된 표현만 사용하세요.
 - 표 셀 안에 줄바꿈을 넣지 마세요 (Markdown 표가 깨집니다).
 - 대화체 인사말이나 표 앞뒤 설명 문구 없이 표만 출력하세요."""
-        idea_user_msg = f"[코스 매개 작물/테마]: {chunks[0]['crops']}\n\n[지역 로컬 상점 소개 참고자료]:\n{reference_str}"
+        # strict_single_crop 적용 시(_effective_top_course_crops 가 타겟 작물 1종으로 좁혀진
+        # 경우) 아이디어 생성 프롬프트에도 원본 crops 전체 문자열이 아니라 좁혀진 작물만 전달해,
+        # 다른 공동 재배 작물이 아이디어에 섞여 들어가지 않게 합니다.
+        idea_user_msg = f"[코스 매개 작물/테마]: {', '.join(_effective_top_course_crops)}\n\n[지역 로컬 상점 소개 참고자료]:\n{reference_str}"
         local_ideas = get_chat_completion(idea_system_prompt, idea_user_msg)
     else:
         local_ideas = "*현재 이 지역에 참고할 로컬 상점 소개 정보가 없어 아이디어 제안을 생략합니다.*"
@@ -1847,7 +2271,21 @@ def check_quality_node(state: AgentState) -> Dict[str, Any]:
     코스 청크(retrieved_chunks)가 있으면 기존처럼 코스 사실 기준으로 검증하고, quick_responder_node
     경로처럼 코스 청크는 없지만 culture_chunks/market_insight 가 있으면 그 내용을 근거로 검증합니다.
     아무 근거도 없으면(둘 다 비어있음) 검증을 생략하고 조기 통과시킵니다.
+    **(2026-07-25 추가 — 무조건 반려/Fail-Fast)** retrieve_rag_node 가 DB 매칭 0건으로 검색을
+    중단한 경우(is_exit_early)는 다른 어떤 분기보다 먼저 조기 통과시킵니다. 최종 답변이 결정론적인
+    반려 메시지이므로 검증할 사실이 애초에 없고, retrieve_rag_node 가 이미 조회해둔 market_insight
+    가 상태에 남아있으면 아래 "코스 청크는 없지만 culture/market 은 있는" 분기를 타서 반려
+    메시지를 무관한 통계 컨텍스트와 대조하다 최대 3회의 재작성 루프를 도는 낭비가 생깁니다.
     """
+    if state.get("is_exit_early"):
+        return {
+            "quality_report": {
+                "passed": True,
+                "score": 1.0,
+                "feedback": "조건 미충족으로 기획서 생성을 중단한 반려 응답이므로 평가를 생략합니다.",
+            }
+        }
+
     query = state["query"]
     chunks = state["retrieved_chunks"]
     culture_chunks = state.get("culture_chunks") or []
@@ -1874,6 +2312,21 @@ def check_quality_node(state: AgentState) -> Dict[str, Any]:
             context_str += f"재배작물: {c['crops']}, 경유 행정구역: {c['administrative_areas']}\n"
             context_str += f"본문: {c['content']}\n"
 
+        # report_generator가 실제로 인용한 Market Insight/문화지식 근거도 검증 컨텍스트에
+        # 포함시킵니다 (회귀 방지: 예전엔 이 분기가 코스 사실관계만 컨텍스트로 넘겨서, 리포트가
+        # market_insight 수치를 정확히 인용해도 검증 LLM 입장에서는 "컨텍스트에 없는 수치"로
+        # 보여 오탐 반려(failed) 후 불필요한 query_rewriter 재시도가 발생했음 — quick_responder
+        # 경로(아래 else 분기)는 애초에 이 문제가 없었음. 새 헬퍼를 만들지 않고 그 분기가 쓰는
+        # _build_market_insight_summary_str/_build_culture_context_str를 그대로 재사용).
+        b2b_params_for_context = state.get("b2b_params") or {}
+        quality_target_month = b2b_params_for_context.get("target_month") or date.today().month
+        culture_ctx_for_quality = _build_culture_context_str(culture_chunks, quality_target_month)
+        if culture_ctx_for_quality:
+            context_str += f"\n[제주 밭담문화·작물 생육 지식 근거]:\n{culture_ctx_for_quality}\n"
+        market_ctx_for_quality = _build_market_insight_summary_str(market_insight)
+        if market_ctx_for_quality:
+            context_str += f"\n[관광 방문객 통계 (Market Insight) 근거]:\n{market_ctx_for_quality}\n"
+
         system_prompt = """당신은 생성된 도슨트 추천 답변의 핵심 사실 관계 및 요청 관련성을 검증하는 '품질 검증원'입니다.
 주어진 [사용자 질문], [검색 컨텍스트] 및 [생성된 답변] 을 분석하여 답변의 환각 여부 및 정보 충실도를 채점하세요.
 JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 반환하세요.
@@ -1882,12 +2335,13 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
 1. 코스명, 거리, 소요시간, 난이도, 재배작물, 경유 행정구역 등 컨텍스트에 명시된 구체적 수치/명칭을 답변이 왜곡하거나 컨텍스트와 반대로 서술했는가?
 2. 사용자가 요청한 필수 제약사항(예: 휠체어 전용 코스 여부)을 어기고 부적절한 코스를 추천했는가?
 3. [사용자가 요청한 핵심 조건]에 작물/지역/월이 명시되어 있다면, 답변이 추천한 코스가 그 조건과 실제로 관련이 있는가? 사실관계 자체는 컨텍스트와 일치하더라도, 컨텍스트의 코스들이 요청한 조건과 무관한데 답변이 마치 조건에 맞는 것처럼 추천했다면 이것도 결점으로 판정하세요. (조건이 "(특정 작물/지역/월 조건 없음)"이면 이 항목은 항상 통과로 간주)
+4. 답변에 [관광 방문객 통계 (Market Insight) 근거]나 [제주 밭담문화·작물 생육 지식 근거]가 컨텍스트로 제공되어 있다면, 그 안의 방문객 수/증감률/비중 수치나 작물·제철 서술을 답변이 왜곡했는가? 컨텍스트에 있는 수치를 답변이 그대로 인용한 것은 정상이며, 그 근거 섹션 자체가 컨텍스트에 없다면(위 두 근거 모두 미제공) 이 항목은 검증하지 않습니다.
 
 [검증 대상에서 제외 - 아래 항목은 도슨트의 정상적인 연출이므로 절대 환각이나 결점으로 지적하지 마세요]
 - 날씨 정보, 옷차림/준비물 팁, 여행 조언 등 컨텍스트 밖의 실용적 부가 안내
 - 풍경 묘사, 계절감, 감성적 수식어 등 도슨트 특유의 문학적 표현
 - 컨텍스트에 없는 세부 정보(예: 특정 매장 운영 배경)를 답변이 언급하지 않은 것 (누락은 결함이 아님)
-- 거리/소요시간처럼 컨텍스트에 있는 수치를 답변이 그대로 인용한 경우 (출처 재확인 요구 금지)
+- 거리/소요시간, Market Insight 수치처럼 컨텍스트에 있는 값을 답변이 그대로 인용한 경우 (출처 재확인 요구 금지)
 
 [응답 포맷 (JSON 전용)]
 {

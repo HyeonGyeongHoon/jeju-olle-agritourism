@@ -27,6 +27,14 @@ class AgentState(TypedDict):
     fallback_applied: bool
     fallback_reason: Optional[str]
     market_insight: Optional[Dict[str, Any]]
+    # 무조건 반려(Fail-Fast) 정책 플래그(2026-07-25 정책 전환). retrieve_rag_node 의 세 필터
+    # (target_course / preferred_location / key_item_or_crop) 중 하나라도 매칭 0건이면, 예전처럼
+    # 그 조건을 해제하고 전체 검색으로 폴백하지 않고 그 자리에서 즉시 종료하면서 이 두 필드를
+    # 채웁니다. route_after_retriever 가 is_exit_early 를 보고 report_generator 대신
+    # quick_responder(반려 메시지 작성)로 제어를 넘기며, tool_agent_node/check_quality_node 도
+    # 이 플래그를 확인해 각각 도구 재호출과 품질 재작성 루프를 건너뜁니다.
+    is_exit_early: bool
+    exit_reason: Optional[str]
     
     # 4. 답변 생성 및 로컬 추천 정보
     docent_answer: Optional[str]

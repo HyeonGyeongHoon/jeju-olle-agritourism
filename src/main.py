@@ -152,6 +152,10 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
         "fallback_applied": False,
         "fallback_reason": None,
         "market_insight": None,
+        # 무조건 반려(Fail-Fast) 플래그 — retrieve_rag_node 가 DB 매칭 0건일 때 세우고
+        # route_after_retriever 가 읽습니다(초기값은 반드시 반려 아님 상태).
+        "is_exit_early": False,
+        "exit_reason": None,
         "docent_answer": None,
         "recommendations": [],
         "final_response": None,

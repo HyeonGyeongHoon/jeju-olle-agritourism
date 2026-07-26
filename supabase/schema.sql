@@ -207,3 +207,22 @@ CREATE TABLE IF NOT EXISTS visitor_analytics (
 
 CREATE INDEX IF NOT EXISTS idx_visitor_analytics_lookup
 ON visitor_analytics (year_month, region_dong);
+
+
+-- 10. courses 의 읍/면/동 단위 행정구역 컬럼 (2026-07-25, 신규 - 기존 컬럼은 그대로 유지하는
+-- 추가 전용 마이그레이션).
+-- 왜 필요한가: courses.administrative_areas 는 법정리/법정동 단위(예: "표선리,세화리,토산리")인데,
+-- 같은 법정리 이름이 지리적으로 전혀 다른 읍/면에 동시에 존재합니다(data/jeju_districts.csv 기준
+-- 9건 — 예: "세화리"가 구좌읍(제주시)과 표선면(서귀포시)에 각각 존재). 그래서 질의의
+-- preferred_location(읍/면/동 단위)을 법정리 후보로 역확장해 administrative_areas 에 부분 문자열로
+-- 찾는 기존 방식은 동명이인 충돌로 엉뚱한 지역의 코스를 매칭시켰습니다(라이브 재현: "구좌읍 감귤"
+-- 질의가 표선면/남원읍의 4코스를 "세화리" 문자열 충돌로 구좌읍 코스로 오인).
+-- 이 컬럼은 코스별로 실제 소속이 확정된 읍/면/동 이름만 쉼표로 담아 그 충돌을 제거합니다.
+-- 채우는 방법: scripts/backfill_eup_myeon_dong_areas.py (anchor-consistency 알고리즘 — 같은 코스
+-- 안의 모호하지 않은 법정리 토큰들이 가리키는 읍/면과 교집합을 취해 모호한 토큰을 해소).
+-- 소비하는 곳: src/agent/nodes.py 의 _filter_course_ids_by_location (읍/면/동 단위 질의는 이 컬럼과
+-- 완전 토큰 일치로만 매칭). 아직 백필되지 않은(NULL/빈 문자열) 행은 기존 법정리 역확장 방식으로
+-- 폴백하므로, 이 ALTER 만 실행하고 백필을 미뤄도 동작은 유지됩니다.
+-- 주의: 이 블록은 Supabase SQL 에디터에서 수동으로 단독 실행하세요(파일 상단부터 재실행하면
+-- 기존 테이블과 데이터가 모두 삭제됩니다).
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS eup_myeon_dong_areas TEXT;

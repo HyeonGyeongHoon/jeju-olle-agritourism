@@ -21,11 +21,54 @@ def _base_state(**b2b_overrides):
     }
 
 
+def test_quick_responder_node_returns_rejection_without_any_db_lookup_when_exit_early():
+    """정책 전환(2026-07-25 무조건 반려): retrieve_rag_node 가 DB 매칭 0건으로 검색을 중단하면
+    (is_exit_early=True) route_after_retriever 가 report_generator 대신 이 노드로 보냅니다.
+    이 노드는 exit_reason 을 그대로 반려 메시지로 돌려주기만 하고, culture_crop_knowledge/
+    visitor_analytics 조회나 LLM 호출을 전혀 하지 않아야 합니다 — 반려 사유와 무관한 문화·통계
+    내용을 덧붙이면 사실상 대체 정보 추천이 되고, quality_checker 가 그 무관한 컨텍스트와 반려
+    메시지를 대조하며 재작성 루프를 돌게 됩니다."""
+    state = _base_state(key_item_or_crop="마늘", preferred_location="대정읍")
+    state["intent_category"] = "course_recommendation"
+    state["is_exit_early"] = True
+    state["exit_reason"] = "'대정읍' 지역과 직접 겹치는 올레 코스를 찾지 못해 기획서를 생성할 수 없습니다."
+
+    with patch.object(nodes, "get_supabase_client") as mock_client, \
+         patch.object(nodes, "_search_culture_knowledge") as mock_search_culture, \
+         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion") as mock_llm:
+        result = quick_responder_node(state)
+
+    mock_client.assert_not_called()
+    mock_search_culture.assert_not_called()
+    mock_fetch_market.assert_not_called()
+    mock_llm.assert_not_called()
+    assert "기획서를 작성할 수 없습니다" in result["final_response"]
+    assert "대정읍" in result["final_response"]
+    assert result["docent_answer"] == result["final_response"]
+
+
+def test_quick_responder_node_uses_generic_rejection_when_exit_reason_missing():
+    """exit_reason 이 비어 있어도(방어) 반려 메시지 자체는 만들어야 합니다."""
+    state = _base_state()
+    state["is_exit_early"] = True
+    state["exit_reason"] = None
+
+    with patch.object(nodes, "get_supabase_client") as mock_client, \
+         patch.object(nodes, "get_chat_completion") as mock_llm:
+        result = quick_responder_node(state)
+
+    mock_client.assert_not_called()
+    mock_llm.assert_not_called()
+    assert "기획서를 작성할 수 없습니다" in result["final_response"]
+    assert "찾지 못했습니다" in result["final_response"]
+
+
 def test_quick_responder_node_declines_course_recommendation_for_other_intent():
     """사용자 요청: "당근 코스 추천해줘"처럼 intent_category가 "other"로 분류된 질의는
-    (제주 올레와 아예 무관하든, 기획서가 아닌 단순 코스 "추천"을 요청하는 것이든) 문화·작물
-    지식이나 통계를 검색해 대신 답하지 않고, 코스 추천을 제공하지 않는다는 서비스 범위 안내로
-    즉시 종료해야 합니다."""
+    (제주 올레와 아예 무관한 "제주도 날씨 어때?" 같은 질문이든, 기획서가 아닌 단순 코스
+    "추천"을 요청하는 것이든) 문화·작물 지식이나 통계를 검색해 대신 답하지 않고, 서비스
+    범위를 안내하는 보편적인 거절 메시지로 즉시 종료해야 합니다."""
     state = _base_state(key_item_or_crop="당근")
     state["intent_category"] = "other"
 
@@ -136,6 +179,23 @@ def test_quick_responder_node_includes_market_location_resolution_note():
     assert "구좌읍" in user_msg
     assert "외국인" in user_msg
     assert "1위 지역으로 자동 선정" in user_msg
+
+
+def test_quick_responder_node_passes_raw_none_month_to_market_insight_when_unspecified():
+    """사용자 요청: "외도동 최근 방문객 수는?"처럼 질의에 월이 명시되지 않으면(b2b_params.
+    target_month=None), quick_responder_node 는 "오늘 날짜의 달"로 대체한 값이 아니라 원본
+    그대로(None)를 _fetch_market_insight 에 넘겨야 합니다. target_month 를 오늘 날짜로 강제하면
+    DB 적재 범위가 이번 달까지가 아닐 때(2026-07-25 라이브 QA로 확인) 실제로는 최근 데이터가
+    있는데도 "통계를 찾지 못했다"는 오답과 불필요한 quality_checker 재시도 루프를 유발했습니다."""
+    state = _base_state(preferred_location="외도동", target_month=None)
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
+         patch.object(nodes, "get_chat_completion", return_value="답변"):
+        quick_responder_node(state)
+
+    assert mock_fetch_market.call_args[0][2] is None
 
 
 def test_quick_responder_node_skips_market_insight_when_disabled():
