@@ -46,6 +46,18 @@ _COURSE_META_DISPLAY_FIELDS = (
 )
 
 
+def _josa_ro(word: str) -> str:
+    """한국어 조사 '로'/'으로'를 마지막 글자의 받침 유무로 선택합니다. 받침이 없거나
+    ('으로'가 아니라) 'ㄹ' 받침이면 '로', 그 외 받침이 있으면 '으로'(예: "코스"→"로",
+    "동선"→"으로", "서울"→"로"). 한글이 아닌 문자로 끝나면 안전하게 '으로'를 반환합니다.
+    """
+    word = word.strip()
+    if not word or not ("가" <= word[-1] <= "힣"):
+        return "으로"
+    jongseong = (ord(word[-1]) - 0xAC00) % 28
+    return "로" if jongseong in (0, 8) else "으로"
+
+
 def _build_course_meta_context_str(course_meta: Dict[str, Any] | None) -> str:
     """코스 메타데이터를 LLM 프롬프트에 넣을 "라벨: 값" 목록 문자열로 만듭니다. 값이 없는
     필드는 아예 넣지 않아, LLM 이 빈 값을 보고 추측으로 메우지 않도록 합니다.
@@ -477,6 +489,20 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     else:
         strict_single_crop_rule_str = ""
 
+    # 조건 완화(fallback) 각주 지시문을 Python 에서 미리 완결된 문장으로 만들어 프롬프트에
+    # 넣습니다. 예전엔 "적용 여부는 {fallback} 입니다" 처럼 True/False 리터럴을 그대로
+    # 프롬프트에 박아 넣었는데, LLM이 이 사실-서술문 형태를 실제 리포트에 인용해도 되는
+    # 내용으로 착각해 "조건 완화 적용 여부: False" 같은 디버그성 문구를 리포트에 그대로
+    # 출력하는 사고가 있었습니다(회귀 방지). fallback_applied 는 2026-07-25 fail-fast
+    # 정책 이후 항상 False 라 사실상 else 분기만 타지만, 상태값 자체는 그대로 두고 프롬프트에
+    # 노출되는 표현만 "지시문" 형태로 바꿉니다.
+    if fallback and reason:
+        fallback_note_rule_str = (
+            f"- 표 바로 다음 줄에 이 각주를 정확히 한 줄만 추가하세요: \"완화 사유: {reason}\""
+        )
+    else:
+        fallback_note_rule_str = "- 조건 완화 각주는 추가하지 마세요. 표로 섹션을 바로 종료하세요."
+
     system_prompt = load_prompt("generate_report.md").format(
         weather_description=weather.get('description', ''),
         weather_warnings=', '.join(weather.get('warnings', [])) or '없음',
@@ -488,8 +514,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         location_resolution_str=location_resolution_str,
         price_range_str=price_range_str,
         price_breakdown_str=price_breakdown_str,
-        fallback=fallback,
-        reason=reason,
+        fallback_note_rule_str=fallback_note_rule_str,
         strict_single_crop_rule_str=strict_single_crop_rule_str,
     )
 
@@ -584,8 +609,21 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         report += f" ({total_distance}km)"
     report += "\n"
     if safety.get("reroute_required"):
-        plan_b = safety.get("alternative_query_override") or "해안 구간 대신 중산간/숲길 우회 동선"
-        report += f"- **[Plan B (우회/대체)]**: {safety.get('safety_status', 'WARNING')} 상황 시 {plan_b}으로 전환, 필요 시 실내 체험 프로그램으로 대체\n"
+        plan_b = (safety.get("alternative_query_override") or "해안 구간 대신 중산간/숲길 우회 동선").strip()
+        status = safety.get("safety_status", "WARNING")
+        if plan_b.endswith((".", "!", "?")):
+            # weather_info.guideline 처럼 이미 완결된 권고 문장이 들어온 경우입니다. 명사구를
+            # 가정한 "{plan_b}으로 전환" 을 그대로 이어붙이면 "…권장하세요.으로 전환" 처럼
+            # 문장이 꼬이므로(회귀 방지), 별도 문장으로 분리해 자연스럽게 이어 씁니다.
+            report += (
+                f"- **[Plan B (우회/대체)]**: {status} 상황 시 {plan_b} "
+                f"필요 시 실내 체험 프로그램으로 대체하세요.\n"
+            )
+        else:
+            report += (
+                f"- **[Plan B (우회/대체)]**: {status} 상황 시 {plan_b}{_josa_ro(plan_b)} 전환, "
+                f"필요 시 실내 체험 프로그램으로 대체\n"
+            )
     else:
         report += "- **[Plan B (우회/대체)]**: 현재 특이 리스크는 없으나, 돌발 강풍·우천 시를 대비해 단축 동선 및 실내 체험/휴게 프로그램으로의 전환 대안을 상시 준비\n"
 

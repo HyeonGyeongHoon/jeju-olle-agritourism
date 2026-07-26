@@ -94,6 +94,94 @@ def test_generate_report_node_produces_all_five_sections_in_one_call():
     assert result["docent_answer"] == docent_llm_answer
 
 
+def test_generate_report_node_plan_b_does_not_tangle_a_complete_guideline_sentence():
+    """회귀 방지: weather_info.guideline 처럼 이미 마침표로 끝나는 완결된 권고 문장이
+    alternative_query_override 로 들어오면(예: 7~8월 폭염기 가이드라인), 예전 코드는
+    "{override}으로 전환" 처럼 명사구를 가정하고 조사를 이어붙여 "…권장하세요.으로 전환"
+    같은 문장 꼬임이 실제 리포트에 노출됐습니다. 이제는 완결된 문장을 그대로 살리고 조사를
+    이어붙이지 않아야 합니다."""
+    state = _base_state(
+        safety_check={
+            "reroute_required": True,
+            "safety_status": "WARNING",
+            "alternative_query_override": "이른 아침·늦은 오후 시간대 탐방과 그늘 구간 위주 동선을 권장하세요.",
+        }
+    )
+
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+        result = generate_report_node(state)
+
+    report = result["final_response"]
+    assert "권장하세요.으로 전환" not in report
+    assert "권장하세요." in report
+    assert "필요 시 실내 체험 프로그램으로 대체하세요." in report
+
+
+def test_generate_report_node_plan_b_uses_correct_particle_for_noun_phrase_override():
+    """회귀 방지: alternative_query_override 가 완결된 문장이 아니라 짧은 명사구(예: DANGER
+    분기의 하드코딩 대체 경로)인 경우, 받침 없는 명사 뒤에는 '으로'가 아니라 '로'를 붙여야
+    합니다(예: "코스" + "로" = "코스로 전환", "코스으로 전환"은 비문)."""
+    state = _base_state(
+        safety_check={
+            "reroute_required": True,
+            "safety_status": "DANGER",
+            "alternative_query_override": "바람을 피해 걷기 좋은 내륙 숲길 오솔길 코스",
+        }
+    )
+
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+        result = generate_report_node(state)
+
+    report = result["final_response"]
+    assert "코스로 전환" in report
+    assert "코스으로 전환" not in report
+
+
+def test_generate_report_node_plan_b_default_route_phrase_unchanged():
+    """reroute_required 는 True인데 alternative_query_override 자체가 없는(방어적 기본값)
+    경우의 기존 동작(받침 있는 명사 "동선" + "으로")은 그대로 유지되어야 합니다."""
+    state = _base_state(safety_check={"reroute_required": True, "safety_status": "WARNING"})
+
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+        result = generate_report_node(state)
+
+    assert "해안 구간 대신 중산간/숲길 우회 동선으로 전환" in result["final_response"]
+
+
+def test_generate_report_node_prompt_never_leaks_raw_fallback_booleans():
+    """회귀 방지: 예전엔 프롬프트에 "적용 여부는 {fallback} 입니다" 처럼 True/False 리터럴을
+    직접 박아 넣어서, LLM이 이를 실제 인용 대상 사실로 착각해 "조건 완화 적용 여부: False"
+    같은 디버그성 문구를 리포트에 그대로 출력하는 사고가 있었습니다. fallback_applied=False
+    (현재 fail-fast 정책 하의 실제 값)인 정상 경로에서 시스템 프롬프트 자체에 "True"/"False"
+    리터럴이나 "적용 여부는" 같은 사실-서술형 문구가 전혀 없어야 합니다 — 대신 완결된
+    지시문(각주를 추가하지 말라는 지시)만 있어야 합니다."""
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]) as mock_llm, \
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+        generate_report_node(_base_state())
+
+    system_prompt = mock_llm.call_args_list[0][0][0]
+    assert "적용 여부는" not in system_prompt
+    assert "{fallback}" not in system_prompt
+    assert "조건 완화 각주는 추가하지 마세요" in system_prompt
+
+
+def test_generate_report_node_prompt_instructs_exact_footnote_when_fallback_applied():
+    """fallback_applied=True + fallback_reason 이 있는(비현실적이지만 방어적으로 남겨둔)
+    경로에서는, 프롬프트가 True/False 리터럴이 아니라 실제 각주 문장을 그대로 지시해야
+    합니다."""
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]) as mock_llm, \
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+        generate_report_node(_base_state(fallback_applied=True, fallback_reason="테스트 완화 사유"))
+
+    system_prompt = mock_llm.call_args_list[0][0][0]
+    assert "완화 사유: 테스트 완화 사유" in system_prompt
+    assert "{reason}" not in system_prompt
+    assert "True" not in system_prompt
+
+
 def test_generate_report_node_skips_section_3_ideas_when_no_local_recommendations():
     with patch.object(nodes, "get_chat_completion", return_value="## 1. ...\n## 2. ...") as mock_llm, \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):

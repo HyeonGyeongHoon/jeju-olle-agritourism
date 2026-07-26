@@ -366,6 +366,35 @@ def test_tool_agent_includes_course_meta_and_no_alternative_recommendation_rule(
     assert "인용" in system_prompt
 
 
+def test_tool_agent_internal_instruction_note_is_not_labeled_as_plain_caution_and_prompt_forbids_echoing():
+    """회귀 방지: 코스 지정 질의의 내부 지시문에 붙던 "[주의]" 라벨이 시스템 프롬프트의
+    절대규칙 2번에서 그대로 이름이 불려("[주의] 지시를 우선하세요") LLM이 이를 사용자에게
+    보여줘도 되는 경고문으로 착각해, 실제 답변에 "[주의] 이 질문은 특정 코스에 대한 것이므로…"
+    문구를 그대로 베껴 쓰는 사고가 라이브 QA에서 관측됐습니다. 라벨을 "[내부 지시 사항]"으로
+    바꾸고, 이 라벨/지시 문장 자체를 답변에 옮기지 말라는 규칙을 시스템 프롬프트에 명시적으로
+    추가해야 합니다."""
+    state: AgentState = {
+        "query": "7코스 초보자한테 추천할 만해?",
+        "target_course": "7코스",
+        "course_meta": _COURSE_7_META,
+        "tool_outputs": [{
+            "tool_name": "retrieve_visitor_statistics_tool",
+            "result": "[오류] '서홍동'은 올레 코스 경유 지역이 아니어서... 조회 가능한 지역: 강정동, 구좌읍, 성산읍",
+        }],
+        "tool_depth": 1,
+        "quality_report": None,
+        "loop_count": 0,
+    }
+    with patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km입니다.") as mock_llm:
+        tool_agent_node(state)
+
+    system_prompt, user_msg = mock_llm.call_args[0]
+    assert "[주의] 이 질문은" not in user_msg
+    assert "[내부 지시 사항" in user_msg
+    assert "옮기거나 언급하지" in user_msg
+    assert "답변에 그대로 인용" in system_prompt
+
+
 def test_tool_agent_prompt_targets_b2b_planner_not_tourist():
     """사용자 요청: 이 서비스는 관광객이 아니라 지자체 담당자/여행사 기획자를 위한 B2B 기획서
     작성 도구인데, "외도동 최근 방문객 수는?" 같은 통계 질의의 답변에 "혼잡도를 고려해 여유 있게
