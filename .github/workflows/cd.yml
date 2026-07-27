@@ -9,35 +9,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Google Auth
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-    - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
-
-    - name: Configure Docker for GCP Artifact Registry
-      run: |
-        gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
-
-    - name: Build and Push Docker Image
-      run: |
-        docker build -t asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/jeju-olle-repo/jeju-olle-docent:latest .
-        docker push asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/jeju-olle-repo/jeju-olle-docent:latest
-
-    - name: Copy docker-compose.prod.yml to VM
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.GCP_VM_IP }}
-        username: ${{ secrets.GCP_VM_USERNAME }}
-        key: ${{ secrets.GCP_VM_SSH_KEY }}
-        source: "docker-compose.prod.yml"
-        target: "/home/${{ secrets.GCP_VM_USERNAME }}/app"
-
     - name: Deploy to VM via SSH
       uses: appleboy/ssh-action@v1.0.3
       with:
@@ -45,21 +16,21 @@ jobs:
         username: ${{ secrets.GCP_VM_USERNAME }}
         key: ${{ secrets.GCP_VM_SSH_KEY }}
         script: |
-          cd /home/${{ secrets.GCP_VM_USERNAME }}/app
+          # 1. 배포 경로 이동
+          cd /home/${{ secrets.GCP_VM_USERNAME }}/app/jeju-olle-agritourism
           
-          # GCP Artifact Registry 로그인 권한 갱신 (VM 내부)
-          gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
+          # 2. 브랜치 최신화 및 소스 코드 가져오기 (로컬 강제 동기화)
+          git fetch origin main
+          git reset --hard origin/main
           
-          # 환경 변수 .env 동적 생성
-          echo "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" > .env
-          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
+          # 3. 환경 변수 .env 동적 생성
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" > .env
           echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> .env
           echo "UPSTAGE_API_KEY=${{ secrets.UPSTAGE_API_KEY }}" >> .env
           echo "VISIT_JEJU_API_KEY=${{ secrets.VISIT_JEJU_API_KEY }}" >> .env
           
-          # 이미지 다운로드 및 컨테이너 재기동
-          docker compose -f docker-compose.prod.yml pull
-          docker compose -f docker-compose.prod.yml up -d
+          # 4. 이미지 로컬 빌드 및 컨테이너 재기동
+          docker compose -f docker-compose.prod.yml up -d --build
           
-          # 미사용 이미지 정리 (서버 용량 관리용)
+          # 5. 미사용 이미지 정리 (서버 용량 관리용)
           docker image prune -f

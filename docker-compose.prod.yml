@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   api:
-    image: asia-northeast3-docker.pkg.dev/${GCP_PROJECT_ID}/jeju-olle-repo/jeju-olle-docent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -14,7 +16,9 @@ services:
     restart: always
 
   web:
-    image: asia-northeast3-docker.pkg.dev/${GCP_PROJECT_ID}/jeju-olle-repo/jeju-olle-docent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8501:8501"
     environment:
