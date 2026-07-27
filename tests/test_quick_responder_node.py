@@ -109,6 +109,9 @@ def test_quick_responder_node_builds_answer_from_culture_and_market():
             "active_months": None,
         }
     ]
+    # key_item_or_crop(또는 concept_theme)이 있어야 문화지식 검색이 실행됩니다
+    # (2026-07-27: 작물/테마 신호가 전혀 없으면 검색 자체를 생략하도록 변경 — 아래
+    # test_quick_responder_node_skips_culture_search_* 참고).
     market_insight = {
         "region_dong": "구좌읍",
         "year_month": "2026-05",
@@ -127,7 +130,9 @@ def test_quick_responder_node_builds_answer_from_culture_and_market():
          patch.object(nodes, "_search_culture_knowledge", return_value=culture_chunks) as mock_search_culture, \
          patch.object(nodes, "_fetch_market_insight", return_value=market_insight), \
          patch.object(nodes, "get_chat_completion", return_value="제주 밭담문화는...") as mock_llm:
-        result = quick_responder_node(_base_state(preferred_location="구좌읍"))
+        result = quick_responder_node(
+            _base_state(preferred_location="구좌읍", key_item_or_crop="밭담")
+        )
 
     assert result["culture_chunks"] == culture_chunks
     assert result["market_insight"] == market_insight
@@ -141,6 +146,58 @@ def test_quick_responder_node_builds_answer_from_culture_and_market():
     system_prompt, user_msg = mock_llm.call_args[0]
     assert "제주의 밭담은 화산석으로 쌓은 경계 담이다." in user_msg
     assert "12,000명" in user_msg
+
+
+# --- 작물/테마 신호 없는 순수 통계 질의는 문화지식 검색 자체를 생략 (2026-07-27) ---
+# _search_culture_knowledge 는 key_item_or_crop 이 없으면 fallback_query(원본 질의 텍스트)를
+# 그대로 임베딩해 임계치 0.1의 낮은 유사도로 검색하므로, "OO동 방문객 수는?"처럼 작물/테마와
+# 무관한 순수 통계 질의에도 유채꽃/양파 등 무관한 문서가 섞여 나올 수 있었습니다(라이브 QA 확인).
+
+
+def test_quick_responder_node_skips_culture_search_when_no_crop_or_theme():
+    """key_item_or_crop 도 concept_theme 도 없고 target_course 도 없으면(=순수 통계 질의),
+    _search_culture_knowledge 를 아예 호출하지 않고 관광 통계만으로 답해야 합니다."""
+    market_insight = {
+        "region_dong": "구좌읍",
+        "year_month": "2026-05",
+        "total_visitors": 12000,
+        "yoy_growth_rate": None,
+        "female_ratio": None,
+        "male_ratio": None,
+        "youth_10s_ratio": None,
+        "young_2030_ratio": None,
+        "middle_4060_ratio": None,
+        "senior_70s_ratio": None,
+        "foreign_visitors": None,
+    }
+    state = _base_state(preferred_location="구좌읍")
+    state["query"] = "구좌읍 최근 방문객 수는?"
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_search_culture_knowledge") as mock_search_culture, \
+         patch.object(nodes, "_fetch_market_insight", return_value=market_insight), \
+         patch.object(nodes, "get_chat_completion", return_value="구좌읍 방문객은...") as mock_llm:
+        result = quick_responder_node(state)
+
+    mock_search_culture.assert_not_called()
+    assert result["culture_chunks"] == []
+    _, user_msg = mock_llm.call_args[0]
+    assert "문화·작물 지식 검색 결과" not in user_msg
+    assert "12,000명" in user_msg
+
+
+def test_quick_responder_node_runs_culture_search_when_only_concept_theme_present():
+    """key_item_or_crop 은 없어도 concept_theme(예: "힐링")이 있으면 여전히 문화지식 검색을
+    실행해야 합니다 — 테마 신호 자체가 없는 경우만 생략 대상입니다."""
+    state = _base_state(concept_theme="힐링")
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_search_culture, \
+         patch.object(nodes, "_fetch_market_insight", return_value=None), \
+         patch.object(nodes, "get_chat_completion", return_value="답변"):
+        quick_responder_node(state)
+
+    mock_search_culture.assert_called_once()
 
 
 def test_quick_responder_node_no_results_returns_apology_without_llm_call():

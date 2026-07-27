@@ -106,7 +106,7 @@ def _build_culture_context_str(culture_chunks: List[Dict[str, Any]], target_mont
             )
         meta_str = f" [{', '.join(meta_parts)}]" if meta_parts else ""
         culture_context_str += f"\n[문화지식 {i+1}] {cc['title']}{meta_str}:\n{cc['content']}\n"
-    return culture_context_str
+    return culture_context_str.replace("~", "～")
 
 
 def _build_market_insight_summary_str(market_insight: Dict[str, Any] | None) -> str:
@@ -129,7 +129,7 @@ def _build_market_insight_summary_str(market_insight: Dict[str, Any] | None) -> 
     if market_insight.get("young_2030_ratio") is not None:
         parts.append(f"2030 비중 {market_insight['young_2030_ratio']}%")
     if market_insight.get("middle_4060_ratio") is not None:
-        parts.append(f"40~60대 비중 {market_insight['middle_4060_ratio']}%")
+        parts.append(f"40～60대 비중 {market_insight['middle_4060_ratio']}%")
     if market_insight.get("senior_70s_ratio") is not None:
         parts.append(f"70대 이상 비중 {market_insight['senior_70s_ratio']}%")
     return "📊 " + ", ".join(parts)
@@ -224,7 +224,19 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
                 client, course_meta.get("administrative_areas")
             )
 
-    culture_chunks = _search_culture_knowledge(client, key_item_or_crop, fallback_query)
+    # 질문에 작물명/테마(key_item_or_crop)도 컨셉 테마(concept_theme)도 없으면 문화지식 검색
+    # 자체를 실행하지 않습니다. _search_culture_knowledge 는 key_item_or_crop 이 없으면
+    # fallback_query(원본 질의 텍스트)를 그대로 임베딩해 유사도 0.1의 낮은 임계치로 검색하므로,
+    # "OO동 방문객 수는?"처럼 순수 통계 질의에도 유채꽃/양파 등 무관한 문화·작물 문서가 섞여
+    # 나올 수 있었습니다(라이브 QA 확인). 작물/테마 신호가 전혀 없는 질의는 통계 정보만으로
+    # 간결하게 답해야 하므로, 이 경우 검색 자체를 생략합니다.
+    concept_theme = b2b_params.get("concept_theme")
+    should_search_culture = bool(key_item_or_crop) or bool(concept_theme)
+    culture_chunks = (
+        _search_culture_knowledge(client, key_item_or_crop, fallback_query)
+        if should_search_culture
+        else []
+    )
 
     market_insight = None
     if include_market_insights:
@@ -235,9 +247,16 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         # 월 필터 없이 해당 지역의 최신 데이터를 가져옵니다.
         market_insight = _fetch_market_insight(client, preferred_location, b2b_params.get("target_month"))
 
-    culture_context_str = _build_culture_context_str(culture_chunks, target_month)
-    if not culture_context_str:
-        culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다.)"
+    # should_search_culture 가 False 면 검색을 아예 하지 않았으므로, "찾지 못했다"는 문구조차
+    # 프롬프트에 넣지 않습니다 — 시도하지 않은 검색을 실패한 것처럼 언급하면 LLM 이 그 문구에
+    # 반응해 불필요한 사족을 답변에 덧붙일 수 있습니다. culture_section 자체를 통째로 생략해
+    # 순수 통계 질의에 더 간결한 프롬프트를 구성합니다.
+    culture_section = ""
+    if should_search_culture:
+        culture_context_str = _build_culture_context_str(culture_chunks, target_month)
+        if not culture_context_str:
+            culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다.)"
+        culture_section = f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
 
     market_context_str = _build_market_insight_summary_str(market_insight) or "(관련 관광 방문객 통계를 찾지 못했습니다.)"
 
@@ -269,10 +288,11 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         system_prompt = load_prompt("quick_responder.md")
         user_msg = (
             f"[질문]: {query}\n\n"
-            f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
+            f"{culture_section}"
             f"[관광 방문객 통계]:\n{market_context_str}{location_note}{course_note}"
         )
         answer = get_chat_completion(system_prompt, user_msg)
+        answer = answer.replace("~", "～")
     else:
         answer = (
             "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식이나 관광 방문객 통계를 "
@@ -675,6 +695,8 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     report += "\n## 5. 🛡️ Trust Tagging\n"
     report += f"[출처: {' / '.join(source_labels)}]\n"
 
+    docent_answer = docent_answer.replace("~", "～")
+    report = report.replace("~", "～")
     return {
         "docent_answer": docent_answer,
         "recommendations": recommendations,
