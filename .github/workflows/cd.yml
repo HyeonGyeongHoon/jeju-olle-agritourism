@@ -9,17 +9,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Debug SSH connection
-      run: |
-        echo "$SSH_KEY" > /tmp/deploy_key
-        chmod 600 /tmp/deploy_key
-        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
-        ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key -vvv $USER@$HOST "echo CONNECTED" || true
-      env:
-        SSH_KEY: ${{ secrets.GCP_VM_SSH_KEY }}
-        USER: ${{ secrets.GCP_VM_USERNAME }}
-        HOST: ${{ secrets.GCP_VM_IP }}
-
     - name: Deploy to VM via SSH
       uses: appleboy/ssh-action@v1.0.3
       with:
