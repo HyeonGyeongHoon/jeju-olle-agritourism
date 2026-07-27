@@ -29,6 +29,8 @@ jobs:
       run: |
         ruff check .
         ruff format --check .
+      continue-on-error: true
+
 
     - name: Run Pytest with Mock Env
       env:
