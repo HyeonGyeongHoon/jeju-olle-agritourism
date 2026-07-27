@@ -1,19 +1,20 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
+
+from src.agent.nodes import (
+    check_quality_node,
+    classify_intent_node,
+    evaluate_safety_node,
+    generate_report_node,
+    parse_intent_node,
+    quick_responder_node,
+    resolve_market_location_node,
+    retrieve_rag_node,
+    rewrite_query_node,
+    tool_agent_node,
+    tool_executor_node,
+)
 from src.agent.state import AgentState
 from src.models.schema import IntentCategory
-from src.agent.nodes import (
-    classify_intent_node,
-    parse_intent_node,
-    resolve_market_location_node,
-    evaluate_safety_node,
-    retrieve_rag_node,
-    generate_report_node,
-    check_quality_node,
-    rewrite_query_node,
-    quick_responder_node,
-    tool_executor_node,
-    tool_agent_node
-)
 
 
 def route_after_location_resolve(state: AgentState) -> str:
@@ -73,7 +74,7 @@ def should_continue(state: AgentState) -> str:
         print(f"[+] 품질 검증 통과! (최종 루프 횟수: {loop_count})")
         return "end"
     if loop_count >= 3:
-        print(f"[!] 최대 자율 순환 횟수(3회)에 도달하여 현재 단계에서 강제 종료하고 답변을 생성합니다.")
+        print("[!] 최대 자율 순환 횟수(3회)에 도달하여 현재 단계에서 강제 종료하고 답변을 생성합니다.")
         return "end"
 
     # 2. 하이브리드 교정 라우팅

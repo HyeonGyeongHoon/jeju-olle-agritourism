@@ -128,7 +128,6 @@ def retrieve_culture_crop_knowledge_tool(keyword_or_crop: str) -> str:
         months = c.get("active_months")
         season_info = f" (활동/제철 월: {months})" if months else ""
         result_str += f"\n{i+1}. [{title}]{season_info}:\n{content}\n"
-
         
     return result_str.strip()
 

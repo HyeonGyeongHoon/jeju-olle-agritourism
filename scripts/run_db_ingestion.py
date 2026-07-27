@@ -19,6 +19,8 @@ from src.ingestion.database_loader import (
     load_safety_etiquette_to_db,
     load_wheelchair_segments_to_db,
 )
+
+
 def chunk_by_subtitle(text: str) -> list[str]:
     """본문 텍스트를 단락/소제목 단위(\n\n)로 청킹합니다."""
     if not text:
@@ -112,7 +114,7 @@ def run():
     if os.path.exists(safety_guide_path):
         with open(safety_guide_path, "r", encoding="utf-8") as f:
             safety_guide_data = json.load(f)
-        print(f"[+] 안전 및 에티켓 가이드 데이터 로드 완료")
+        print("[+] 안전 및 에티켓 가이드 데이터 로드 완료")
 
     detail_map = {item["course_name"]: item.get("detail_text", "") for item in detail_data}
 
