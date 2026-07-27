@@ -74,6 +74,7 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
     from src.agent.nodes import (
         _build_fail_fast_result,
         _crop_location_boost,
+        _describe_hard_constraint_zero_match,
         _describe_target_course_mismatch,
         _execute_rdb_filtering,
         _fetch_market_insight,
@@ -120,6 +121,22 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
 
     # RDB 기반 필터링 (완화 없이 1회만 단독 실행, 휠체어 등 hard_constraints 만 반영)
     course_ids = _execute_rdb_filtering(client, hard)
+
+    # **(2026-07-27 잔여 갭 수정)** 아래 세 필터(target_course/preferred_location/
+    # key_item_or_crop)는 전부 `if <조건> and course_ids:` 로 감싸져 있어, course_ids 가 이미
+    # 이 시점에 0건이면(=하드 제약 자체가 0건, 현재 유일한 하드 제약은 휠체어) 셋 다 조건문을
+    # 통과 못 해 무조건 반려(is_exit_early)가 한 번도 걸리지 않고 그대로 아래 `if course_ids:`
+    # (pgvector 검색)도 건너뛴 채 정상 종료 형태로 빠져나갔습니다. 그 결과 report_generator 의
+    # 더 오래된 `if not chunks:` 문구("데이터베이스에서 찾을 수 없었습니다")로만 응답이 만들어져
+    # 구체적인 사유가 사라지고, is_exit_early 가 꺼져 있던 탓에 check_quality_node 의 조기
+    # 단락도 적용되지 않아 재작성 루프까지 낭비됐습니다(CLAUDE.md "Known remaining gap" — 현재
+    # DB엔 휠체어 이용 가능 코스가 10개 있어 실제로는 발생하지 않던 잠재 버그). 이제 다른 세
+    # 필터와 동일하게, 이 시점에 이미 0건이면 그 자리에서 즉시 반려합니다.
+    if not course_ids:
+        exit_reason = _describe_hard_constraint_zero_match(hard) or (
+            "지정하신 조건에 맞는 올레 코스 데이터를 찾지 못해 기획서를 생성할 수 없습니다."
+        )
+        return _build_fail_fast_result(exit_reason, market_insight)
 
     # B2B 성격상 B2C형 소프트 제약 및 Fallback 완화 로직은 제거됨 (기본값 설정).
     # 아래 세 필터도 2026-07-25 부터 무조건 반려(Fail-Fast)로 전환되어 이 두 값을 True/사유로
@@ -312,6 +329,18 @@ def _filter_course_ids_by_target_course(
     if matched_ids:
         return matched_ids, True
     return course_ids, False
+
+
+def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
+    """RDB 하드 제약 필터(`_execute_rdb_filtering`) 자체가 이 시점에 이미 0건을 반환한 구체적인
+    이유를 알아낼 수 있으면 반환합니다. 현재 유일한 하드 제약은 `wheelchair_required` 뿐이므로
+    그게 켜져 있었을 때만 그 사유를 특정하고, 그 외(예: DB 조회 자체가 실패했거나 courses
+    테이블이 비어있는 경우)는 원인을 특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를
+    쓰게 합니다 — `_describe_target_course_mismatch` 와 동일한 설계입니다.
+    """
+    if hard.get("wheelchair_required"):
+        return "휠체어로 이용 가능한 올레 코스를 찾지 못해 기획서를 생성할 수 없습니다."
+    return None
 
 
 def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict) -> str | None:

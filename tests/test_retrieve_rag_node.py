@@ -222,6 +222,58 @@ def test_retrieve_rag_node_treats_null_crops_and_areas_as_empty_string_instead_o
     assert chunks[0]["administrative_areas"] == ""
 
 
+def test_retrieve_rag_node_exits_early_when_rdb_hard_filter_itself_returns_zero_courses():
+    """회귀 방지(2026-07-27, CLAUDE.md "Known remaining gap" 해소): _execute_rdb_filtering
+    (휠체어 등 하드 제약 필터) 자체가 이 시점에 이미 0건을 반환하면, 그 뒤의
+    target_course/preferred_location/key_item_or_crop 세 필터는 전부 `if <조건> and
+    course_ids:` 가드 때문에 진입하지 못해 무조건 반려가 한 번도 걸리지 않고 통과해버렸습니다
+    (report_generator 의 더 오래된 일반 "찾을 수 없었습니다" 문구로만 응답되고,
+    check_quality_node 의 is_exit_early 조기 단락도 적용되지 않아 재작성 루프까지 낭비).
+    이제 이 시점에 이미 0건이면 다른 세 필터와 동일하게 즉시 반려해야 하며, 하드 제약이
+    휠체어였다면 그 구체적 사유를 실어야 합니다."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"wheelchair_required": True},
+        "vector_query": "휠체어로 이용 가능한 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_culture:
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "휠체어" in result["exit_reason"]
+    assert "생성할 수 없습니다" in result["exit_reason"]
+    assert result["retrieved_chunks"] == []
+    assert result["culture_chunks"] == []
+    assert result["sub_segments"] == []
+    assert result["fallback_applied"] is False
+    assert result["fallback_reason"] is None
+    mock_embed.assert_not_called()
+    mock_culture.assert_not_called()
+    assert client.rpc_calls == []
+
+
+def test_retrieve_rag_node_exits_early_with_generic_reason_when_hard_filter_zero_without_wheelchair():
+    """하드 제약 필터가 0건인데 휠체어 조건이 켜져 있지 않은 경우(예: DB 조회 자체가 실패해
+    빈 결과가 온 경우)는 구체적인 사유를 특정할 수 없으므로, 일반 반려 문구로 fail-fast 해야
+    합니다 — 그래도 반려 자체는 걸려야 하며, chunks=[] 로 통과해버리면 안 됩니다."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed:
+        result = retrieve_rag_node(_base_state())
+
+    assert result["is_exit_early"] is True
+    assert "생성할 수 없습니다" in result["exit_reason"]
+    mock_embed.assert_not_called()
+
+
 def test_retrieve_rag_node_stops_without_substitution_when_target_course_fails_hard_constraint():
     """사용자 요청: "휠체어가 필요한 2코스 기획서 만들어줘"처럼 지정한 코스가 하드 제약(휠체어)을
     만족 못 하면, 다른 코스로 조용히 대체 추천하지 말고 chunks=[] 와 함께 구체적인 사유만 남겨야
