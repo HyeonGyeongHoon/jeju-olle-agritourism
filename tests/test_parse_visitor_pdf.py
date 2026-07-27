@@ -1,4 +1,6 @@
 import os
+import pytest
+
 
 from src.ingestion.parse_visitor_pdf import (
     _parse_ranked_visitor_lines,
@@ -71,35 +73,39 @@ def test_gender_and_age_header_detection():
 
 # --- 실제 PDF 검증 (data/raw_data/reports/*.pdf, 육안 확인한 실측값과 대조) ---
 
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(REPORTS_DIR, "제주 관광객 방문 패턴 분석 보고서 2026년 5월호.pdf")),
+    reason="실제 5월호 PDF 파일이 존재하지 않아 건너뜁니다."
+)
 def test_parse_visitor_pdf_real_may_issue():
     path = os.path.join(REPORTS_DIR, "제주 관광객 방문 패턴 분석 보고서 2026년 5월호.pdf")
     records = parse_visitor_pdf(path)
-
+    
     assert len(records) == 43
     by_dong = {r["region_dong"]: r for r in records}
-
+    
     # "7월호"는 발행월일 뿐, 실제 데이터는 1페이지 "분석 년 월"(2026년03월)에서 온다.
     assert records[0]["year_month"] == "2026-03"
-
+    
     aewol = by_dong["애월읍"]
     assert aewol["total_visitors"] == 798109
     assert aewol["yoy_growth_rate"] == 13.8
     assert aewol["male_ratio"] == 47.8
     assert aewol["female_ratio"] == 52.2
     assert aewol["foreign_visitors"] == 9443
-
+    
     # 시군명이 로우 앞에 붙어 파싱이 깨지기 쉬웠던 케이스 (회귀 방지)
     daeryun = by_dong["대륜동"]
     assert daeryun["total_visitors"] == 251041
     assert daeryun["yoy_growth_rate"] == 58.2
-
+    
     # 성별/연령대 순위표에 등장하지 않는 행정동은 None 유지 (시군 평균 등으로 대체하지 않음)
     unranked_candidates = [
         r for r in records
         if r["female_ratio"] is None and r["youth_10s_ratio"] is None
     ]
     assert len(unranked_candidates) > 0
-
+    
     bonggae = by_dong["봉개동"]
     assert bonggae["youth_10s_ratio"] == 14.1
     assert bonggae["young_2030_ratio"] == 21.0
@@ -107,11 +113,16 @@ def test_parse_visitor_pdf_real_may_issue():
     assert bonggae["senior_70s_ratio"] == 8.56
 
 
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(REPORTS_DIR, "제주 관광객 방문 패턴 분석 보고서 2026년 7월호.pdf")),
+    reason="실제 7월호 PDF 파일이 존재하지 않아 건너뜁니다."
+)
 def test_parse_visitor_pdf_year_month_uses_analysis_month_not_filename():
     """"7월호" 파일명이지만 실제 데이터는 2개월 전(5월) 기준임을 확인."""
     path = os.path.join(REPORTS_DIR, "제주 관광객 방문 패턴 분석 보고서 2026년 7월호.pdf")
     records = parse_visitor_pdf(path)
     assert records[0]["year_month"] == "2026-05"
+
 
 
 def test_parse_visitor_pdf_fallback_on_missing_file():
