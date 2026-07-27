@@ -1,5 +1,12 @@
+import os
 import pytest
 from src.agent.tools import retrieve_visitor_statistics_tool
+
+# dummy 환경 변수 설정 시 실제 Supabase DB 조회가 필요한 통계 테스트 건너뛰기
+is_dummy = "dummy" in os.getenv("SUPABASE_URL", "")
+if is_dummy:
+    pytestmark = pytest.mark.skip("실제 Supabase DB 연결이 필요한 통계 도구 테스트이므로 건너뜁니다.")
+
 
 def test_retrieve_visitor_statistics_tool_success():
     # 성산읍은 올레길이 지나는 대표적인 유효 행정동입니다.

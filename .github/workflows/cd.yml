@@ -1,0 +1,65 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Google Auth
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker for GCP Artifact Registry
+      run: |
+        gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
+
+    - name: Build and Push Docker Image
+      run: |
+        docker build -t asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/jeju-olle-repo/jeju-olle-docent:latest .
+        docker push asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/jeju-olle-repo/jeju-olle-docent:latest
+
+    - name: Copy docker-compose.prod.yml to VM
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.GCP_VM_IP }}
+        username: ${{ secrets.GCP_VM_USERNAME }}
+        key: ${{ secrets.GCP_VM_SSH_KEY }}
+        source: "docker-compose.prod.yml"
+        target: "/home/${{ secrets.GCP_VM_USERNAME }}/app"
+
+    - name: Deploy to VM via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.GCP_VM_IP }}
+        username: ${{ secrets.GCP_VM_USERNAME }}
+        key: ${{ secrets.GCP_VM_SSH_KEY }}
+        script: |
+          cd /home/${{ secrets.GCP_VM_USERNAME }}/app
+          
+          # GCP Artifact Registry 로그인 권한 갱신 (VM 내부)
+          gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
+          
+          # 환경 변수 .env 동적 생성
+          echo "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" > .env
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
+          echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> .env
+          echo "UPSTAGE_API_KEY=${{ secrets.UPSTAGE_API_KEY }}" >> .env
+          echo "VISIT_JEJU_API_KEY=${{ secrets.VISIT_JEJU_API_KEY }}" >> .env
+          
+          # 이미지 다운로드 및 컨테이너 재기동
+          docker compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml up -d
+          
+          # 미사용 이미지 정리 (서버 용량 관리용)
+          docker image prune -f

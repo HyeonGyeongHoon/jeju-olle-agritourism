@@ -1,7 +1,17 @@
+import os
 from datetime import date
 from unittest.mock import patch
 
 import pytest
+
+# dummy 환경 변수 설정 시 실제 API 와 DB 가 필요한 도구 에이전트 테스트 건너뛰기
+is_dummy = (
+    "dummy" in os.getenv("SUPABASE_URL", "")
+    or "dummy" in os.getenv("UPSTAGE_API_KEY", "")
+)
+if is_dummy:
+    pytestmark = pytest.mark.skip("실제 API 키 및 DB 연결이 필요한 도구 에이전트 테스트이므로 건너뜁니다.")
+
 from src.agent import nodes
 from src.agent.state import AgentState
 from src.agent.nodes import (

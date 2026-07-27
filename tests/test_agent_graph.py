@@ -1,7 +1,17 @@
+import os
 import pytest
 from src.agent.graph import agent_runtime
 from src.agent.state import AgentState
 from src.agent.weather_client import assess_weather_risk_from_query
+
+# dummy 환경 변수 설정 시 실제 API 와 DB 가 필요한 시나리오 테스트 건너뛰기
+is_dummy = (
+    "dummy" in os.getenv("SUPABASE_URL", "")
+    or "dummy" in os.getenv("UPSTAGE_API_KEY", "")
+)
+if is_dummy:
+    pytestmark = pytest.mark.skip("실제 API 키 및 DB 연결이 필요한 통합 시나리오 테스트이므로 건너뜁니다.")
+
 
 
 def test_intent_parsing_and_graph_execution():
