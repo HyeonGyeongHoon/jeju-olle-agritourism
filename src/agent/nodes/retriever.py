@@ -333,41 +333,104 @@ def _filter_course_ids_by_target_course(
 
 def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
     """RDB 하드 제약 필터(`_execute_rdb_filtering`) 자체가 이 시점에 이미 0건을 반환한 구체적인
-    이유를 알아낼 수 있으면 반환합니다. 현재 유일한 하드 제약은 `wheelchair_required` 뿐이므로
-    그게 켜져 있었을 때만 그 사유를 특정하고, 그 외(예: DB 조회 자체가 실패했거나 courses
-    테이블이 비어있는 경우)는 원인을 특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를
-    쓰게 합니다 — `_describe_target_course_mismatch` 와 동일한 설계입니다.
+    이유를 알아낼 수 있으면 반환합니다. 하드 제약은 `wheelchair_required` 외에 2026-07-27부터
+    `max_time_hours`/`max_distance_km`/`max_difficulty`(시간/거리/난이도 상한) 3종이 추가되어
+    총 4종입니다 — 지정된 조건을 전부 모아 한 문장으로 합성하고(예: "2.0시간 이내로 다녀올 수
+    있는 난이도 '하' 이하의 올레 코스가 존재하지 않아 기획서를 생성할 수 없습니다"), 아무 것도
+    지정되지 않았으면(예: DB 조회 자체가 실패했거나 courses 테이블이 비어있는 경우) 원인을
+    특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를 쓰게 합니다 —
+    `_describe_target_course_mismatch` 와 동일한 설계입니다.
     """
+    conditions = []
     if hard.get("wheelchair_required"):
-        return "휠체어로 이용 가능한 올레 코스를 찾지 못해 기획서를 생성할 수 없습니다."
-    return None
+        conditions.append("휠체어로 이용 가능한")
+    max_time_hours = hard.get("max_time_hours")
+    if max_time_hours is not None:
+        conditions.append(f"{max_time_hours}시간 이내로 다녀올 수 있는")
+    max_distance_km = hard.get("max_distance_km")
+    if max_distance_km is not None:
+        conditions.append(f"{max_distance_km}km 이내의")
+    max_difficulty = hard.get("max_difficulty")
+    if max_difficulty:
+        conditions.append(f"난이도 '{max_difficulty}' 이하의")
+    if not conditions:
+        return None
+    return f"{' '.join(conditions)} 올레 코스가 존재하지 않아 기획서를 생성할 수 없습니다."
 
 
 def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict) -> str | None:
     """target_course가 후보에서 빠진 구체적인 이유를 알아낼 수 있으면 반환합니다. 특히
-    target_course가 실제로 존재하는 코스인데 하드 제약(현재는 휠체어) 때문에 후보에서
-    제외된 경우("2코스는 실존하지만 휠체어 구간이 없음"), "그 코스명을 못 찾았다"는 일반
-    문구 대신 정확한 사유를 사용자에게 알립니다. **(2026-07-24 수정)** 이 경우 다른 코스로
-    조용히 대체 추천하지 않고 기획서 작성 자체를 중단합니다(사용자 요청) — 그래서 이
-    사유 문구도 "다른 코스로 대체 추천합니다"가 아니라 "왜 작성할 수 없는지"만 명시해야
-    합니다. target_course가 애초에 DB에 없는 코스명이면(예: "가파도") 알아낼 수 없으므로
-    None을 반환해 호출부가 일반 문구를 쓰게 합니다.
+    target_course가 실제로 존재하는 코스인데 하드 제약(휠체어, 그리고 2026-07-27부터 시간/거리/
+    난이도 상한) 때문에 후보에서 제외된 경우("2코스는 실존하지만 휠체어 구간이 없음", "1코스는
+    실존하지만 실제 소요시간이 요청한 상한을 초과함"), "그 코스명을 못 찾았다"는 일반 문구 대신
+    정확한 사유를 사용자에게 알립니다. **(2026-07-24 수정)** 이 경우 다른 코스로 조용히 대체
+    추천하지 않고 기획서 작성 자체를 중단합니다(사용자 요청) — 그래서 이 사유 문구도 "다른
+    코스로 대체 추천합니다"가 아니라 "왜 작성할 수 없는지"만 명시해야 합니다. target_course가
+    애초에 DB에 없는 코스명이면(예: "가파도") 알아낼 수 없으므로 None을 반환해 호출부가 일반
+    문구를 쓰게 합니다.
+
+    휠체어 조건 확인 질의(`course_name,has_wheelchair_segment`)와 시간/거리/난이도 확인 질의
+    (`course_name,estimated_time_hours,total_distance_km,difficulty`)는 별도 질의로
+    분리합니다 — 기존 휠체어 질의의 select 컬럼 문자열을 그대로 유지해 이를 목킹하는 기존
+    테스트 픽스처를 건드리지 않기 위함입니다(2개 조건이 동시에 걸리면 질의도 2번 나가지만,
+    이 함수는 fail-fast 반려 경로에서만 호출되는 드문 경로라 감내할 수 있는 비용입니다).
     """
-    if not hard.get("wheelchair_required"):
+    from src.agent.nodes import _DIFFICULTY_ORDER
+
+    reasons = []
+
+    if hard.get("wheelchair_required"):
+        try:
+            res = (
+                client.table("courses")
+                .select("course_name,has_wheelchair_segment")
+                .eq("course_name", target_course)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[!] target_course 휠체어 조건 확인 실패: {e}")
+            res = None
+        if res and res.data and res.data[0].get("has_wheelchair_segment") != "있음":
+            reasons.append("휠체어로 이용 가능한 구간이 없습니다")
+
+    max_time_hours = hard.get("max_time_hours")
+    max_distance_km = hard.get("max_distance_km")
+    max_difficulty = hard.get("max_difficulty")
+    if max_time_hours is not None or max_distance_km is not None or max_difficulty in _DIFFICULTY_ORDER:
+        try:
+            res2 = (
+                client.table("courses")
+                .select("course_name,estimated_time_hours,total_distance_km,difficulty")
+                .eq("course_name", target_course)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[!] target_course 시간/거리/난이도 조건 확인 실패: {e}")
+            res2 = None
+        if res2 and res2.data:
+            row = res2.data[0]
+            actual_time = row.get("estimated_time_hours")
+            if max_time_hours is not None and actual_time is not None and actual_time > max_time_hours:
+                reasons.append(
+                    f"실제 소요시간({actual_time}시간)이 요청하신 {max_time_hours}시간 이내 조건을 초과합니다"
+                )
+            actual_distance = row.get("total_distance_km")
+            if max_distance_km is not None and actual_distance is not None and actual_distance > max_distance_km:
+                reasons.append(
+                    f"실제 거리({actual_distance}km)가 요청하신 {max_distance_km}km 이내 조건을 초과합니다"
+                )
+            actual_difficulty = row.get("difficulty")
+            if (
+                max_difficulty in _DIFFICULTY_ORDER
+                and actual_difficulty not in _DIFFICULTY_ORDER[: _DIFFICULTY_ORDER.index(max_difficulty) + 1]
+            ):
+                reasons.append(
+                    f"난이도({actual_difficulty})가 요청하신 '{max_difficulty}' 이하 조건을 초과합니다"
+                )
+
+    if not reasons:
         return None
-    try:
-        res = (
-            client.table("courses")
-            .select("course_name,has_wheelchair_segment")
-            .eq("course_name", target_course)
-            .execute()
-        )
-    except Exception as e:
-        print(f"[!] target_course 실존 여부 확인 실패: {e}")
-        return None
-    if res.data and res.data[0].get("has_wheelchair_segment") != "있음":
-        return f"'{target_course}'에는 휠체어로 이용 가능한 구간이 없습니다."
-    return None
+    return f"'{target_course}'에는 " + ", ".join(reasons) + "."
 
 
 def _split_comma_tokens(raw: str | None) -> List[str]:

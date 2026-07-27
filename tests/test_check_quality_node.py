@@ -180,6 +180,53 @@ def test_check_quality_node_includes_market_insight_and_culture_context_when_chu
     assert result["quality_report"]["passed"] is True
 
 
+def test_check_quality_node_replaces_quality_comment_placeholder_on_pass():
+    """Trust Tagging에 남겨둔 {{QUALITY_COMMENT}} 자리표시자가, 이 노드의 실제 검증 결과
+    (passed=True)로 치환되어 final_response에 반영되어야 합니다(기존 {{SELF_RAG_STARS}}
+    치환과 동일한 메커니즘)."""
+    state = {
+        "query": "1코스 알려줘",
+        "retrieved_chunks": [
+            {"course_name": "1코스", "total_distance_km": 15.0, "estimated_time_text": "5시간",
+             "difficulty": "중", "crops": "감귤", "administrative_areas": "성산읍", "content": "..."}
+        ],
+        "culture_chunks": [],
+        "market_insight": None,
+        "final_response": "본문...\n[출처: 원문 가이드북 / 품질 평가: {{QUALITY_COMMENT}}]",
+        "b2b_params": {},
+    }
+
+    with patch.object(nodes, "get_chat_completion", return_value=_report(passed=True)):
+        result = check_quality_node(state)
+
+    assert "{{QUALITY_COMMENT}}" not in result["final_response"]
+    assert "품질 평가: 사실성 검증 완료 및 제약조건 만족" in result["final_response"]
+
+
+def test_check_quality_node_replaces_quality_comment_placeholder_on_fail():
+    """검증 실패(passed=False)면 feedback 첫 문장이 "주의 - ..." 형태로 치환되어야 합니다."""
+    state = {
+        "query": "1코스 알려줘",
+        "retrieved_chunks": [
+            {"course_name": "1코스", "total_distance_km": 15.0, "estimated_time_text": "5시간",
+             "difficulty": "중", "crops": "감귤", "administrative_areas": "성산읍", "content": "..."}
+        ],
+        "culture_chunks": [],
+        "market_insight": None,
+        "final_response": "본문...\n[출처: 원문 가이드북 / 품질 평가: {{QUALITY_COMMENT}}]",
+        "b2b_params": {},
+    }
+    failed_report = json.dumps(
+        {"passed": False, "score": 0.4, "feedback": "코스 거리가 컨텍스트와 다릅니다. 재확인이 필요합니다."}
+    )
+
+    with patch.object(nodes, "get_chat_completion", return_value=failed_report):
+        result = check_quality_node(state)
+
+    assert "{{QUALITY_COMMENT}}" not in result["final_response"]
+    assert "품질 평가: 주의 - 코스 거리가 컨텍스트와 다릅니다." in result["final_response"]
+
+
 def test_check_quality_node_marks_no_condition_when_b2b_params_empty():
     """b2b_params 에 작물/지역/월 조건이 전혀 없으면, 관련성 검증 항목이 항상 통과로
     간주된다는 안내 문구가 컨텍스트에 그대로 들어가야 합니다(조건 없음을 명시)."""

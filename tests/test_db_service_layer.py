@@ -9,6 +9,7 @@ test_search_culture_knowledge.py / test_crop_filter.py 등이 계속 검증합�
 
 import ast
 import os
+from types import SimpleNamespace
 
 from src.agent import nodes
 from src.services import db_service
@@ -86,4 +87,110 @@ def test_data_file_paths_survive_the_module_move():
     # CSV 가 실제로 읽혀 매핑이 채워졌는지
     # (경로만 맞고 내용이 비면 지역 매칭이 전부 죽는다)
     assert db_service._LEGAL_DONG_TO_ADMIN_DONG.get("표선리") == ["표선면"]
+
+
+# --- _execute_rdb_filtering 시간/거리/난이도 상한 하드 필터 (2026-07-27 추가) ---
+# .eq/.lte/.in_ 호출 인자를 기록만 하고, 실제 DB 필터링은 시뮬레이션하지 않는 가짜 쿼리
+# 빌더로 _execute_rdb_filtering 이 hard_constraints 를 올바른 조건으로 옮기는지만 검증한다.
+
+
+class _RecordingCoursesQuery:
+    def __init__(self, ids):
+        self._ids = ids
+        self.eq_calls = []
+        self.lte_calls = []
+        self.in_calls = []
+
+    def select(self, cols):
+        return self
+
+    def eq(self, col, value):
+        self.eq_calls.append((col, value))
+        return self
+
+    def lte(self, col, value):
+        self.lte_calls.append((col, value))
+        return self
+
+    def in_(self, col, values):
+        self.in_calls.append((col, values))
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=[{"id": i} for i in self._ids])
+
+
+class _RecordingClient:
+    def __init__(self, query):
+        self._query = query
+
+    def table(self, name):
+        return self._query
+
+
+def test_execute_rdb_filtering_applies_max_time_hours_as_lte():
+    query = _RecordingCoursesQuery(ids=[1, 2])
+    client = _RecordingClient(query)
+
+    result = db_service._execute_rdb_filtering(client, {"max_time_hours": 3.0})
+
+    assert result == [1, 2]
+    assert query.lte_calls == [("estimated_time_hours", 3.0)]
+
+
+def test_execute_rdb_filtering_applies_max_distance_km_as_lte():
+    query = _RecordingCoursesQuery(ids=[5])
+    client = _RecordingClient(query)
+
+    db_service._execute_rdb_filtering(client, {"max_distance_km": 5.0})
+
+    assert query.lte_calls == [("total_distance_km", 5.0)]
+
+
+def test_execute_rdb_filtering_maps_difficulty_ceiling_to_allowed_list():
+    """max_difficulty 는 상한(이하 모두 허용) 의미입니다(2026-07-27 사용자 확정) —
+    "중"을 요청하면 하/중은 통과하고 상만 제외되어야 합니다."""
+    cases = [
+        ("하", ["하"]),
+        ("중", ["하", "중"]),
+        ("상", ["하", "중", "상"]),
+    ]
+    for max_difficulty, expected_allowed in cases:
+        query = _RecordingCoursesQuery(ids=[])
+        client = _RecordingClient(query)
+        db_service._execute_rdb_filtering(client, {"max_difficulty": max_difficulty})
+        assert query.in_calls == [("difficulty", expected_allowed)]
+
+
+def test_execute_rdb_filtering_combines_all_hard_constraints():
+    query = _RecordingCoursesQuery(ids=[1])
+    client = _RecordingClient(query)
+
+    db_service._execute_rdb_filtering(
+        client,
+        {
+            "wheelchair_required": True,
+            "max_time_hours": 2.0,
+            "max_distance_km": 5.0,
+            "max_difficulty": "중",
+        },
+    )
+
+    assert query.eq_calls == [("has_wheelchair_segment", "있음")]
+    assert query.lte_calls == [("estimated_time_hours", 2.0), ("total_distance_km", 5.0)]
+    assert query.in_calls == [("difficulty", ["하", "중"])]
+
+
+def test_execute_rdb_filtering_skips_unset_constraints():
+    """회귀 방지: hard_constraints 가 비어 있으면(기존 동작) lte/in_ 호출이 전혀 없어야
+    한다 — 새 필터 추가가 wheelchair-only 질의의 기존 동작을 바꾸면 안 된다."""
+    query = _RecordingCoursesQuery(ids=[1, 2, 3])
+    client = _RecordingClient(query)
+
+    result = db_service._execute_rdb_filtering(client, {})
+
+    assert result == [1, 2, 3]
+    assert query.eq_calls == []
+    assert query.lte_calls == []
+    assert query.in_calls == []
     assert db_service._ADMIN_DONG_TO_LEGAL_DONGS.get("표선면")

@@ -335,6 +335,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     참고 재료로 사용합니다.
     """
     from src.agent.nodes import (
+        _QUALITY_COMMENT_PLACEHOLDER,
         _SELF_RAG_STARS_PLACEHOLDER,
         _build_price_breakdown_str,
         _estimate_price_range,
@@ -691,6 +692,9 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     # 근거가 안 맞는 문제였습니다. 자리표시자만 남겨두고, check_quality_node 가 자신의 실제
     # 평가 결과로 치환합니다.
     source_labels.append(f"Self-RAG 신뢰도: {_SELF_RAG_STARS_PLACEHOLDER}")
+    # 별점과 마찬가지로 이 시점에는 확정할 수 없어 자리표시자만 남겨두고, check_quality_node가
+    # 자신의 평가 결과(passed/feedback)로 만든 한 줄 평으로 치환합니다.
+    source_labels.append(f"품질 평가: {_QUALITY_COMMENT_PLACEHOLDER}")
 
     report += "\n## 5. 🛡️ Trust Tagging\n"
     report += f"[출처: {' / '.join(source_labels)}]\n"

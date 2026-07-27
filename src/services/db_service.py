@@ -518,17 +518,40 @@ def _get_known_crop_tags(client: Any) -> set:
     return tags
 
 
+# difficulty 상한 판정에 쓰는 서열(하 < 중 < 상). max_difficulty 는 "이 값 이하 모두 허용"
+# 의미이므로(2026-07-27 사용자 확정), 이 리스트에서 해당 인덱스까지 잘라 in_() 조건으로 씁니다.
+_DIFFICULTY_ORDER = ["하", "중", "상"]
+
+
 def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
     """courses 테이블을 메타데이터(hard_constraints) 기반으로 SQL 필터링하여 일치하는 코스 ID
     리스트를 반환합니다. target_course 는 여기서 하드 필터링하지 않습니다 — course_name 과
     완전 일치하지 않으면(예: 섬 이름 "가파도"가 실제 코스명 "10-1코스"와 문자열이 다른 경우)
     후보가 0개가 되어 그 뒤 검색 전체가 죽는 문제가 있었습니다. target_course 는
     _filter_course_ids_by_target_course 로 지역/작물 조건과 동일하게 fail-soft 처리합니다.
+
+    max_time_hours/max_distance_km/max_difficulty(2026-07-27 추가)는 wheelchair_required와
+    동일하게 여기서 하드 필터링합니다 — 사용자가 명시한 시간/거리/난이도 상한이 courses의 실제
+    범위를 완전히 벗어나면 이 함수가 빈 리스트를 반환하고, retrieve_rag_node 가 그 즉시 무조건
+    반려(is_exit_early)합니다.
     """
     query = client.table("courses").select("id")
 
     if hard.get("wheelchair_required"):
         query = query.eq("has_wheelchair_segment", "있음")
+
+    max_time_hours = hard.get("max_time_hours")
+    if max_time_hours is not None:
+        query = query.lte("estimated_time_hours", max_time_hours)
+
+    max_distance_km = hard.get("max_distance_km")
+    if max_distance_km is not None:
+        query = query.lte("total_distance_km", max_distance_km)
+
+    max_difficulty = hard.get("max_difficulty")
+    if max_difficulty in _DIFFICULTY_ORDER:
+        allowed = _DIFFICULTY_ORDER[: _DIFFICULTY_ORDER.index(max_difficulty) + 1]
+        query = query.in_("difficulty", allowed)
 
     try:
         res = query.execute()

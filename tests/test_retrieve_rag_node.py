@@ -25,6 +25,15 @@ class _FakeCoursesTable:
             self._eq_id = value
         return self
 
+    def lte(self, col, value):
+        # 시간/거리 상한 필터(2026-07-27 추가)는 호출만 받고 무시합니다 — rdb_ids 생성자
+        # 인자가 이미 "필터 후 결과"를 나타내므로 실제 필터링 시뮬레이션은 불필요합니다.
+        return self
+
+    def in_(self, col, values):
+        # 난이도 상한 필터(2026-07-27 추가)도 lte()와 동일하게 호출만 받고 무시합니다.
+        return self
+
     def execute(self):
         if self._mode == "rdb":
             return SimpleNamespace(data=[{"id": i} for i in self._rdb_ids])
@@ -44,6 +53,10 @@ class _FakeCoursesTableForTargetCourseHardConstraint:
         self._rdb_ids = rdb_ids
         self._course_rows_by_id = course_rows_by_id
         self._wheelchair_status_by_course_name = wheelchair_status_by_course_name
+        # course_name -> {"estimated_time_hours":..., "total_distance_km":..., "difficulty":...}
+        # (2026-07-27 추가: _describe_target_course_mismatch 의 시간/거리/난이도 확인 질의용.
+        # 기본은 비워 두고, 필요한 테스트만 인스턴스 생성 후 직접 채웁니다.)
+        self.time_difficulty_by_course_name = {}
         self._select_cols = None
         self._eq_course_name = None
         self._in_ids = None
@@ -61,6 +74,11 @@ class _FakeCoursesTableForTargetCourseHardConstraint:
         self._in_ids = values
         return self
 
+    def lte(self, col, value):
+        # 시간/거리 상한 필터(2026-07-27 추가)는 RDB 필터 단계(select "id")에서만 걸리고,
+        # rdb_ids 생성자 인자가 이미 그 결과를 나타내므로 호출만 받고 무시합니다.
+        return self
+
     def execute(self):
         if self._select_cols == "id":
             return SimpleNamespace(data=[{"id": i} for i in self._rdb_ids])
@@ -69,6 +87,9 @@ class _FakeCoursesTableForTargetCourseHardConstraint:
             if status is None:
                 return SimpleNamespace(data=[])
             return SimpleNamespace(data=[{"course_name": self._eq_course_name, "has_wheelchair_segment": status}])
+        if self._select_cols == "course_name,estimated_time_hours,total_distance_km,difficulty":
+            row = self.time_difficulty_by_course_name.get(self._eq_course_name)
+            return SimpleNamespace(data=[row] if row else [])
         if self._select_cols == "id,administrative_areas,course_name":
             rows = [
                 {**self._course_rows_by_id[i], "id": i}
@@ -272,6 +293,158 @@ def test_retrieve_rag_node_exits_early_with_generic_reason_when_hard_filter_zero
     assert result["is_exit_early"] is True
     assert "생성할 수 없습니다" in result["exit_reason"]
     mock_embed.assert_not_called()
+
+
+# --- 시간/거리/난이도 상한 하드 제약 Fail-Fast (2026-07-27 추가) ---
+# 사용자가 명시한 시간/거리/난이도 상한이 courses 실제 범위를 완전히 벗어나면(현재 실측:
+# estimated_time_hours 2.0~7.0시간, total_distance_km 4.2~20.9km), _execute_rdb_filtering
+# (여기서는 _FakeCoursesTable(rdb_ids=[]) 로 "그 결과 0건"을 직접 시뮬레이션)이 빈 리스트를
+# 반환하고, 그 즉시(wheelchair_required 와 동일한 최상단 체크) 반려되어야 합니다.
+
+
+def test_retrieve_rag_node_exits_early_when_max_time_hours_matches_no_course():
+    """사용자 요청: "1시간 이내로 다녀올 수 있는 코스로 기획서 써줘"처럼 DB 전체 범위(2.0~
+    7.0시간)보다 짧은 시간 상한을 요청하면 즉시 반려되어야 하며, 사유에 시간 조건이
+    구체적으로 언급돼야 합니다."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_time_hours": 1.0},
+        "vector_query": "1시간 이내 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_culture:
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "1.0시간 이내" in result["exit_reason"]
+    assert "생성할 수 없습니다" in result["exit_reason"]
+    assert result["retrieved_chunks"] == []
+    mock_embed.assert_not_called()
+    mock_culture.assert_not_called()
+
+
+def test_retrieve_rag_node_exits_early_when_max_difficulty_matches_no_course():
+    """사용자 요청: "난이도 하 코스만" 처럼 요구한 난이도 상한에 맞는 코스가 하나도 없으면
+    즉시 반려되어야 하며, 사유에 난이도 조건이 구체적으로 언급돼야 합니다."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_difficulty": "하"},
+        "vector_query": "난이도 낮은 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_culture:
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "난이도 '하' 이하" in result["exit_reason"]
+    mock_embed.assert_not_called()
+    mock_culture.assert_not_called()
+
+
+def test_retrieve_rag_node_combines_time_and_difficulty_in_zero_match_reason():
+    """시간과 난이도가 동시에 지정되고 둘 다 0건이면, 반려 사유 한 문장에 두 조건이 모두
+    포함돼야 합니다(사용자 예시: "조건에 맞는 난이도 상의 짧은 코스가 존재하지 않습니다")."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_time_hours": 1.0, "max_difficulty": "하"},
+        "vector_query": "1시간 이내 난이도 하 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "1.0시간 이내" in result["exit_reason"]
+    assert "난이도 '하' 이하" in result["exit_reason"]
+    mock_embed.assert_not_called()
+
+
+def test_retrieve_rag_node_normal_flow_when_time_constraint_is_satisfiable():
+    """회귀 방지: 시간 상한이 DB 실제 범위 안에 있어 매칭되는 코스가 있으면, 기존 정상
+    플로우(벡터 검색까지)가 그대로 동작해야 합니다 — 새 필터가 만족 가능한 조건까지
+    반려로 오판하면 안 됩니다."""
+    courses_table = _FakeCoursesTable(
+        rdb_ids=[1],
+        course_meta_by_id={
+            1: {
+                "course_name": "10-1코스", "crops": "감귤", "administrative_areas": "가파리",
+                "total_distance_km": 4.2, "estimated_time_hours": 2.0,
+                "estimated_time_text": "2시간", "difficulty": "하",
+            },
+        },
+    )
+    client = _FakeClient(
+        courses_table,
+        rpc_data=[{"id": 10, "course_id": 1, "title": "청크", "content": "...", "similarity": 0.9}],
+    )
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_time_hours": 3.0, "max_difficulty": "하"},
+        "vector_query": "3시간 이내 쉬운 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is False
+    assert len(result["retrieved_chunks"]) == 1
+    assert result["retrieved_chunks"][0]["course_name"] == "10-1코스"
+
+
+def test_retrieve_rag_node_describes_target_course_time_mismatch_specifically():
+    """사용자 요청: "1코스인데 1시간 이내로 기획서 써줘"처럼, 지정한 코스는 실존하지만 그 코스의
+    실제 소요시간이 요청한 상한을 초과해 하드 필터에서 빠지는 경우("시간 상한을 만족하는 다른
+    코스는 있지만 1코스는 아님"), '코스명을 못 찾았다'는 일반 문구 대신 실제 수치를 근거로 한
+    구체적 사유를 반환해야 합니다(휠체어 케이스와 동일한 설계)."""
+    courses_table = _FakeCoursesTableForTargetCourseHardConstraint(
+        rdb_ids=[10],
+        course_rows_by_id={10: {"course_name": "10-1코스", "administrative_areas": "가파리"}},
+        wheelchair_status_by_course_name={},
+    )
+    courses_table.time_difficulty_by_course_name = {
+        "1코스": {
+            "course_name": "1코스", "estimated_time_hours": 4.5,
+            "total_distance_km": 15.1, "difficulty": "중",
+        },
+    }
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["target_course"] = "1코스"
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_time_hours": 1.0},
+        "vector_query": "1코스 1시간 이내",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_culture:
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "1코스" in result["exit_reason"]
+    assert "4.5시간" in result["exit_reason"]
+    assert "1.0시간 이내" in result["exit_reason"]
+    mock_embed.assert_not_called()
+    mock_culture.assert_not_called()
 
 
 def test_retrieve_rag_node_stops_without_substitution_when_target_course_fails_hard_constraint():

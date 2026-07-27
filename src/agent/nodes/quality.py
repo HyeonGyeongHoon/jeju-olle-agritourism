@@ -4,6 +4,7 @@
 """
 
 import json
+import re
 from datetime import date
 from typing import Any, Dict
 
@@ -20,6 +21,8 @@ from src.agent.state import AgentState
 
 
 _SELF_RAG_STARS_PLACEHOLDER = "{{SELF_RAG_STARS}}"
+_QUALITY_COMMENT_PLACEHOLDER = "{{QUALITY_COMMENT}}"
+_QUALITY_COMMENT_MAX_LEN = 60
 
 
 def _score_to_stars(score: float, passed: bool) -> str:
@@ -40,6 +43,31 @@ def _score_to_stars(score: float, passed: bool) -> str:
     if not passed:
         filled = min(filled, 3)
     return "★" * filled + "☆" * (5 - filled)
+
+
+def _build_quality_comment(report: dict) -> str:
+    """Trust Tagging에 노출할 품질 평가 한 줄 평을 만듭니다. `_score_to_stars`가 신뢰도를
+    별점으로 시각화한다면, 이 한 줄 평은 그 별점만으로는 보이지 않는 맥락(무엇을 확인했는지,
+    실패했다면 무엇이 문제였는지)을 짧은 문장으로 요약합니다. `report.get("passed", True)`로
+    누락 시 기본값을 True로 두는 것은 `_score_to_stars` 호출부와 동일한 관례를 그대로
+    따른 것입니다(`QualityReportDict`의 세 키 모두 선택 필드 — `json.loads(llm_output)`
+    그대로라 아무 키도 보장되지 않으므로).
+    """
+    if report.get("passed", True):
+        return "사실성 검증 완료 및 제약조건 만족"
+
+    feedback = (report.get("feedback") or "").strip()
+    if not feedback:
+        return "주의 - 세부 사유가 기록되지 않았습니다"
+
+    # 마침표 단순 분리(split("."))는 이 코드베이스의 feedback에 흔한 소수점 숫자("4.2km",
+    # "6.0시간")에서 문장이 아니라 숫자 중간이 잘리는 문제가 있어, 문장 종결 부호 뒤에
+    # 공백/줄바꿈이 오는 경우만 문장 경계로 인정합니다("4.2km"처럼 종결부호 뒤에 숫자가 바로
+    # 붙어 있으면 경계로 보지 않음).
+    first_sentence = re.split(r"(?<=[.!?])\s+", feedback, maxsplit=1)[0].strip()
+    if len(first_sentence) > _QUALITY_COMMENT_MAX_LEN:
+        first_sentence = first_sentence[:_QUALITY_COMMENT_MAX_LEN].rstrip() + "…"
+    return f"주의 - {first_sentence}"
 
 
 def check_quality_node(state: AgentState) -> Dict[str, Any]:
@@ -176,11 +204,17 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
         print(f"[!] 품질 검증원 실행 실패: {e}")
         report = {"passed": True, "score": 0.9, "feedback": "자체 평가 오류로 패스 처리"}
 
-    # Trust Tagging의 별점 자리표시자를 이 노드의 실제 평가 결과로 치환합니다. report_generator가
-    # 실행되지 않은 경로(course_recommendation 이 아닌 의도)는 애초에 Trust Tagging 섹션 자체가
-    # 없어 자리표시자가 없으므로, 이 replace 는 안전하게 아무 것도 하지 않습니다.
+    # Trust Tagging의 별점/품질 한 줄 평 자리표시자를 이 노드의 실제 평가 결과로 치환합니다.
+    # report_generator가 실행되지 않은 경로(course_recommendation 이 아닌 의도)는 애초에 Trust
+    # Tagging 섹션 자체가 없어 자리표시자가 없으므로, 이 replace 는 안전하게 아무 것도 하지
+    # 않습니다. is_exit_early/무근거 조기 통과 분기(위에서 이미 return)도 같은 이유로 이 치환이
+    # 필요 없습니다 — 둘 다 Trust Tagging이 없는 final_response만 다루기 때문입니다.
     stars = _score_to_stars(report.get("score", 0.9), report.get("passed", True))
+    quality_comment = _build_quality_comment(report)
     updated_final_response = final_response.replace(_SELF_RAG_STARS_PLACEHOLDER, stars)
+    updated_final_response = updated_final_response.replace(
+        _QUALITY_COMMENT_PLACEHOLDER, quality_comment
+    )
 
     return {"quality_report": report, "final_response": updated_final_response}
 

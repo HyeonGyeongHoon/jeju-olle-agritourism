@@ -3,7 +3,16 @@
 JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 반환하세요.
 
 [추출 규칙]
-1. hard_constraints: 휠체어 전용 구간 등 신체/동행 조건과 관련된 필수 제약 (wheelchair_required: true/false)
+1. hard_constraints: 신체/동행 조건 및 시간·거리·난이도 상한과 관련된 필수 제약
+   - wheelchair_required: 휠체어 전용 구간 필요 여부 (true/false)
+   - max_time_hours: 사용자가 명시한 최대 소요시간(숫자, 시간 단위). "2시간 이내", "반나절이면
+     되는", "3시간 안에 다녀올 수 있는"처럼 구체적인 시간 상한이 있을 때만 채우고, "짧은
+     코스"처럼 막연한 표현만 있으면 null.
+   - max_distance_km: 사용자가 명시한 최대 거리(숫자, km 단위). "5km 이내", "10km를 넘지 않는"
+     처럼 구체적인 거리 상한이 있을 때만 채우고, 없으면 null.
+   - max_difficulty: 사용자가 요구한 난이도 상한("하"/"중"/"상" 중 하나, 이 값 이하 난이도만
+     허용한다는 뜻이지 정확히 일치해야 한다는 뜻이 아님). "난이도 낮은/쉬운/힘들지 않은" → "하",
+     "무난한/중간 정도" → "중", 언급이 없으면 null.
 2. vector_query: 가이드북 임베딩 검색에 사용할 핵심 자연어 키워드 및 작물명 (예: "당근 밭길", "감귤 코스", "마늘향" 등)
 3. target_month: 질문에 명시된 방문 예정 월 (1~12 정수, 언급 없으면 null). "가을"처럼 계절만 언급된 경우 해당 계절의 대표 월(가을=10)로 추정
 4. season: 질문에 언급된 계절 표현 원문 (예: "가을", "봄", 없으면 null)
@@ -28,7 +37,10 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
 [응답 포맷 (JSON 전용)]
 {
   "hard_constraints": {
-    "wheelchair_required": boolean
+    "wheelchair_required": boolean,
+    "max_time_hours": number or null,
+    "max_distance_km": number or null,
+    "max_difficulty": "하" or "중" or "상" or null
   },
   "vector_query": string,
   "target_month": number or null,

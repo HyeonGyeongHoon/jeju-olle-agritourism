@@ -35,22 +35,36 @@ from typing import Any, Dict, List, Optional, TypedDict, Union
 
 
 class HardConstraints(TypedDict, total=False):
-    """완화가 허용되지 않는 하드 제약(현재는 휠체어 접근성 하나).
+    """완화가 허용되지 않는 하드 제약. 휠체어 접근성 하나였다가(2026-07-27) 시간/거리/난이도
+    상한 3종이 추가되어 총 4종.
 
     채우는 곳: `parse_intent_node` (`nodes/intent.py`) — 정상 경로에서는 LLM JSON
     (`prompts/parse_intent.md` 추출 규칙 1)을 그대로 저장하고, LLM 파싱이 실패한 폴백
     경로에서는 원본 질의의 "휠체어" 키워드를 재확인해 직접 만듭니다(하드 제약을 조용히
-    False 로 초기화하지 않기 위한 fail-closed 안전망).
-    읽는 곳: `_execute_rdb_filtering` / `_describe_target_course_mismatch`
-    (`services/db_service.py`, `nodes/retriever.py`), `rewrite_query_node`.
+    False 로 초기화하지 않기 위한 fail-closed 안전망 — 단, 이 폴백은 wheelchair_required만
+    재확인하고 시간/거리/난이도는 채우지 않습니다. 이 세 필드는 안전 문제가 아니라 사용자가
+    명시한 범위 조건이라, 파싱 실패 시 조용히 없는 것으로 두어도 완화 위험이 없습니다).
+    읽는 곳: `_execute_rdb_filtering` / `_describe_hard_constraint_zero_match` /
+    `_describe_target_course_mismatch` (`services/db_service.py`, `nodes/retriever.py`),
+    `rewrite_query_node`.
 
-    전체가 total=False 인 이유: 소비부가 전부 `hard.get("wheelchair_required")` 형태로
-    읽고, `rewrite_query_node` 는 `constraints.get("hard_constraints",
-    {"wheelchair_required": False})` 로 기본값까지 두고 있습니다 — 즉 LLM 이 이 키를
-    빼먹은 dict 도 실제로 흘러들어올 수 있다는 것을 코드가 이미 전제하고 있습니다.
+    전체가 total=False 인 이유: 소비부가 전부 `hard.get(...)` 형태로 읽고, `rewrite_query_node`
+    는 `constraints.get("hard_constraints", {"wheelchair_required": False})` 로 기본값까지
+    두고 있습니다 — 즉 LLM 이 이 키들을 빼먹은 dict 도 실제로 흘러들어올 수 있다는 것을
+    코드가 이미 전제하고 있습니다.
+
+    max_time_hours/max_distance_km/max_difficulty 는 모두 "상한(이하 모두 허용)" 의미입니다
+    (2026-07-27 사용자 확정) — max_difficulty="중" 이면 난이도 하/중 코스는 통과하고 상만
+    제외됩니다. 값이 courses 테이블의 실제 범위(현재 실측: estimated_time_hours 2.0~7.0시간,
+    total_distance_km 4.2~20.9km)를 완전히 벗어나면 `_execute_rdb_filtering` 필터 결과가
+    0건이 되어 `retrieve_rag_node` 가 즉시 반려(is_exit_early)합니다 — wheelchair_required와
+    동일한 무조건 반려(Fail-Fast) 파이프라인을 그대로 탑니다.
     """
 
     wheelchair_required: bool
+    max_time_hours: float | None
+    max_distance_km: float | None
+    max_difficulty: str | None
 
 
 class ParsedConstraints(TypedDict, total=False):

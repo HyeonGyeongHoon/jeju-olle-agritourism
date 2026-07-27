@@ -38,6 +38,7 @@ from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations
 from src.models.schema import B2BQueryParams, IntentCategory
 from src.services.db_service import (
     _ADMIN_DONG_TO_LEGAL_DONGS,
+    _DIFFICULTY_ORDER,
     _execute_rdb_filtering,
     _fetch_course_meta_by_name,
     _fetch_market_insight,
@@ -66,7 +67,9 @@ from src.agent.nodes.intent import (
     resolve_market_location_node,
 )
 from src.agent.nodes.quality import (
+    _QUALITY_COMMENT_PLACEHOLDER,
     _SELF_RAG_STARS_PLACEHOLDER,
+    _build_quality_comment,
     _score_to_stars,
     check_quality_node,
     rewrite_query_node,
@@ -124,6 +127,7 @@ __all__ = [
     "IntentCategory",
     "AgentState",
     "_ADMIN_DONG_TO_LEGAL_DONGS",
+    "_DIFFICULTY_ORDER",
     "_execute_rdb_filtering",
     "_fetch_course_meta_by_name",
     "_fetch_market_insight",
@@ -156,4 +160,6 @@ __all__ = [
     "_build_market_insight_summary_str",
     "_SELF_RAG_STARS_PLACEHOLDER",
     "_score_to_stars",
+    "_QUALITY_COMMENT_PLACEHOLDER",
+    "_build_quality_comment",
 ]
