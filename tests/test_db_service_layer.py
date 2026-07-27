@@ -147,19 +147,53 @@ def test_execute_rdb_filtering_applies_max_distance_km_as_lte():
     assert query.lte_calls == [("total_distance_km", 5.0)]
 
 
-def test_execute_rdb_filtering_maps_difficulty_ceiling_to_allowed_list():
-    """max_difficulty 는 상한(이하 모두 허용) 의미입니다(2026-07-27 사용자 확정) —
-    "중"을 요청하면 하/중은 통과하고 상만 제외되어야 합니다."""
+def test_execute_rdb_filtering_applies_allowed_difficulties_as_exact_in_filter():
+    """회귀 방지: 예전 max_difficulty 는 "상한(이하 모두 허용)" 이라 "상"을 요청해도 하/중까지
+    통과해서, "2시간 이내인데 난이도 상" 같은 모순 요청을 RDB 단계에서 걸러내지 못했습니다.
+    allowed_difficulties 는 허용 목록이므로 지정한 난이도만 그대로 in_() 에 들어가야 합니다."""
     cases = [
-        ("하", ["하"]),
-        ("중", ["하", "중"]),
-        ("상", ["하", "중", "상"]),
+        (["하"], ["하"]),
+        (["중"], ["중"]),
+        (["상"], ["상"]),
+        (["하", "중"], ["하", "중"]),
     ]
-    for max_difficulty, expected_allowed in cases:
+    for allowed, expected in cases:
         query = _RecordingCoursesQuery(ids=[])
         client = _RecordingClient(query)
-        db_service._execute_rdb_filtering(client, {"max_difficulty": max_difficulty})
-        assert query.in_calls == [("difficulty", expected_allowed)]
+        db_service._execute_rdb_filtering(client, {"allowed_difficulties": allowed})
+        assert query.in_calls == [("difficulty", expected)]
+
+
+def test_execute_rdb_filtering_normalizes_allowed_difficulties_order_and_duplicates():
+    """LLM 이 넘긴 순서/중복과 무관하게 항상 쉬운 순서(하<중<상)로 정규화돼야 합니다 —
+    반려 사유 문구의 표기가 실행마다 달라지지 않게 하기 위함입니다."""
+    query = _RecordingCoursesQuery(ids=[])
+    client = _RecordingClient(query)
+
+    db_service._execute_rdb_filtering(client, {"allowed_difficulties": ["상", "하", "상"]})
+
+    assert query.in_calls == [("difficulty", ["하", "상"])]
+
+
+def test_execute_rdb_filtering_ignores_invalid_or_empty_allowed_difficulties():
+    """allowed_difficulties 가 None/빈 리스트이거나 DB 에 없는 값만 담고 있으면 난이도 조건이
+    없는 것으로 취급해야 합니다 — 유효하지 않은 값을 그대로 in_() 에 넘기면 사용자가 지정하지도
+    않은 조건 때문에 0건 반려가 나기 때문입니다."""
+    for hard in ({"allowed_difficulties": None}, {"allowed_difficulties": []},
+                 {"allowed_difficulties": ["아주 어려움"]}, {"allowed_difficulties": "상"}):
+        query = _RecordingCoursesQuery(ids=[1, 2, 3])
+        client = _RecordingClient(query)
+        result = db_service._execute_rdb_filtering(client, hard)
+        assert result == [1, 2, 3]
+        assert query.in_calls == []
+
+
+def test_normalize_allowed_difficulties_returns_canonical_list():
+    assert db_service._normalize_allowed_difficulties({"allowed_difficulties": ["중"]}) == ["중"]
+    assert db_service._normalize_allowed_difficulties(
+        {"allowed_difficulties": ["상", "하"]}
+    ) == ["하", "상"]
+    assert db_service._normalize_allowed_difficulties({}) == []
 
 
 def test_execute_rdb_filtering_combines_all_hard_constraints():
@@ -172,7 +206,7 @@ def test_execute_rdb_filtering_combines_all_hard_constraints():
             "wheelchair_required": True,
             "max_time_hours": 2.0,
             "max_distance_km": 5.0,
-            "max_difficulty": "중",
+            "allowed_difficulties": ["하", "중"],
         },
     )
 

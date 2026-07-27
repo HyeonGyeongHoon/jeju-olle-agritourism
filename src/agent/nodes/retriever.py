@@ -331,16 +331,24 @@ def _filter_course_ids_by_target_course(
     return course_ids, False
 
 
+def _format_difficulty_labels(levels: List[str]) -> str:
+    """허용 난이도 목록을 사유 문구에 넣을 표기로 만듭니다(["상"] → "'상'",
+    ["하","중"] → "'하' 또는 '중'"). 목록이 비어 있으면 호출하지 않습니다."""
+    return " 또는 ".join(f"'{level}'" for level in levels)
+
+
 def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
     """RDB 하드 제약 필터(`_execute_rdb_filtering`) 자체가 이 시점에 이미 0건을 반환한 구체적인
     이유를 알아낼 수 있으면 반환합니다. 하드 제약은 `wheelchair_required` 외에 2026-07-27부터
-    `max_time_hours`/`max_distance_km`/`max_difficulty`(시간/거리/난이도 상한) 3종이 추가되어
-    총 4종입니다 — 지정된 조건을 전부 모아 한 문장으로 합성하고(예: "2.0시간 이내로 다녀올 수
-    있는 난이도 '하' 이하의 올레 코스가 존재하지 않아 기획서를 생성할 수 없습니다"), 아무 것도
-    지정되지 않았으면(예: DB 조회 자체가 실패했거나 courses 테이블이 비어있는 경우) 원인을
-    특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를 쓰게 합니다 —
+    `max_time_hours`/`max_distance_km`(시간/거리 상한)와 `allowed_difficulties`(허용 난이도
+    목록) 3종이 추가되어 총 4종입니다 — 지정된 조건을 전부 모아 한 문장으로 합성하고(예:
+    "2.0시간 이내로 다녀올 수 있는 난이도 '상'인 올레 코스가 존재하지 않아 기획서를 생성할 수
+    없습니다"), 아무 것도 지정되지 않았으면(예: DB 조회 자체가 실패했거나 courses 테이블이
+    비어있는 경우) 원인을 특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를 쓰게 합니다 —
     `_describe_target_course_mismatch` 와 동일한 설계입니다.
     """
+    from src.agent.nodes import _normalize_allowed_difficulties
+
     conditions = []
     if hard.get("wheelchair_required"):
         conditions.append("휠체어로 이용 가능한")
@@ -350,9 +358,9 @@ def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
     max_distance_km = hard.get("max_distance_km")
     if max_distance_km is not None:
         conditions.append(f"{max_distance_km}km 이내의")
-    max_difficulty = hard.get("max_difficulty")
-    if max_difficulty:
-        conditions.append(f"난이도 '{max_difficulty}' 이하의")
+    allowed_difficulties = _normalize_allowed_difficulties(hard)
+    if allowed_difficulties:
+        conditions.append(f"난이도 {_format_difficulty_labels(allowed_difficulties)}인")
     if not conditions:
         return None
     return f"{' '.join(conditions)} 올레 코스가 존재하지 않아 기획서를 생성할 수 없습니다."
@@ -360,9 +368,10 @@ def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
 
 def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict) -> str | None:
     """target_course가 후보에서 빠진 구체적인 이유를 알아낼 수 있으면 반환합니다. 특히
-    target_course가 실제로 존재하는 코스인데 하드 제약(휠체어, 그리고 2026-07-27부터 시간/거리/
-    난이도 상한) 때문에 후보에서 제외된 경우("2코스는 실존하지만 휠체어 구간이 없음", "1코스는
-    실존하지만 실제 소요시간이 요청한 상한을 초과함"), "그 코스명을 못 찾았다"는 일반 문구 대신
+    target_course가 실제로 존재하는 코스인데 하드 제약(휠체어, 그리고 2026-07-27부터 시간/거리
+    상한과 허용 난이도 목록) 때문에 후보에서 제외된 경우("2코스는 실존하지만 휠체어 구간이
+    없음", "1코스는 실존하지만 실제 소요시간이 요청한 상한을 초과함", "1코스의 실제 난이도가
+    요청한 난이도 목록에 없음"), "그 코스명을 못 찾았다"는 일반 문구 대신
     정확한 사유를 사용자에게 알립니다. **(2026-07-24 수정)** 이 경우 다른 코스로 조용히 대체
     추천하지 않고 기획서 작성 자체를 중단합니다(사용자 요청) — 그래서 이 사유 문구도 "다른
     코스로 대체 추천합니다"가 아니라 "왜 작성할 수 없는지"만 명시해야 합니다. target_course가
@@ -375,7 +384,7 @@ def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict
     테스트 픽스처를 건드리지 않기 위함입니다(2개 조건이 동시에 걸리면 질의도 2번 나가지만,
     이 함수는 fail-fast 반려 경로에서만 호출되는 드문 경로라 감내할 수 있는 비용입니다).
     """
-    from src.agent.nodes import _DIFFICULTY_ORDER
+    from src.agent.nodes import _normalize_allowed_difficulties
 
     reasons = []
 
@@ -395,8 +404,12 @@ def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict
 
     max_time_hours = hard.get("max_time_hours")
     max_distance_km = hard.get("max_distance_km")
-    max_difficulty = hard.get("max_difficulty")
-    if max_time_hours is not None or max_distance_km is not None or max_difficulty in _DIFFICULTY_ORDER:
+    allowed_difficulties = _normalize_allowed_difficulties(hard)
+    if (
+        max_time_hours is not None
+        or max_distance_km is not None
+        or allowed_difficulties
+    ):
         try:
             res2 = (
                 client.table("courses")
@@ -421,11 +434,13 @@ def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict
                 )
             actual_difficulty = row.get("difficulty")
             if (
-                max_difficulty in _DIFFICULTY_ORDER
-                and actual_difficulty not in _DIFFICULTY_ORDER[: _DIFFICULTY_ORDER.index(max_difficulty) + 1]
+                allowed_difficulties
+                and actual_difficulty
+                and actual_difficulty not in allowed_difficulties
             ):
                 reasons.append(
-                    f"난이도({actual_difficulty})가 요청하신 '{max_difficulty}' 이하 조건을 초과합니다"
+                    f"실제 난이도({actual_difficulty})가 요청하신 난이도 조건"
+                    f"({', '.join(allowed_difficulties)})에 포함되지 않습니다"
                 )
 
     if not reasons:
@@ -563,7 +578,7 @@ def _filter_course_ids_by_crop(
 
     known_crop_tags = _get_known_crop_tags(client)
     if key_item_or_crop not in known_crop_tags:
-        return course_ids, True
+        return course_ids, False
 
     try:
         res = client.table("courses").select("id,crops").in_("id", course_ids).execute()

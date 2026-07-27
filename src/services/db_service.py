@@ -518,9 +518,28 @@ def _get_known_crop_tags(client: Any) -> set:
     return tags
 
 
-# difficulty 상한 판정에 쓰는 서열(하 < 중 < 상). max_difficulty 는 "이 값 이하 모두 허용"
-# 의미이므로(2026-07-27 사용자 확정), 이 리스트에서 해당 인덱스까지 잘라 in_() 조건으로 씁니다.
+# courses.difficulty 의 유효 값 전체를 쉬운 순서(하 < 중 < 상)로 나열한 것. 예전에는
+# max_difficulty(상한) 를 인덱스로 잘라 허용 집합을 만드는 데 썼지만, 난이도 조건이
+# allowed_difficulties(허용 목록) 로 바뀐 뒤로는 (1) LLM 이 넘긴 값이 실제 DB 값인지
+# 검증하고 (2) 사유 문구에 쓸 때 표기 순서를 일정하게 맞추는 용도로 씁니다.
 _DIFFICULTY_ORDER = ["하", "중", "상"]
+
+
+def _normalize_allowed_difficulties(hard: dict) -> List[str]:
+    """hard_constraints 의 allowed_difficulties 를 "DB 에 실제로 존재하는 난이도 값만, 쉬운
+    순서대로, 중복 없이" 정리해 반환합니다. 지정이 없거나(None) 유효 값이 하나도 없으면 빈
+    리스트를 반환하고, 그 경우 호출부는 난이도 조건 자체가 없는 것으로 취급합니다 — LLM 이
+    엉뚱한 문자열("아주 어려움" 등)을 넣었다고 해서 그것을 그대로 in_() 에 넘겨 전 코스를
+    0건으로 만들어 버리면, 사용자가 지정하지도 않은 조건 때문에 반려되기 때문입니다
+    (기존 max_difficulty 시절의 `if max_difficulty in _DIFFICULTY_ORDER` 가드와 동일한 취지).
+
+    표기 순서를 _DIFFICULTY_ORDER 기준으로 고정하는 이유는 반려 사유 문구("난이도 '하' 또는
+    '중'인 …")가 LLM 이 나열한 순서에 따라 들쭉날쭉해지지 않게 하기 위함입니다.
+    """
+    raw = hard.get("allowed_difficulties")
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    return [level for level in _DIFFICULTY_ORDER if level in raw]
 
 
 def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
@@ -530,10 +549,13 @@ def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
     후보가 0개가 되어 그 뒤 검색 전체가 죽는 문제가 있었습니다. target_course 는
     _filter_course_ids_by_target_course 로 지역/작물 조건과 동일하게 fail-soft 처리합니다.
 
-    max_time_hours/max_distance_km/max_difficulty(2026-07-27 추가)는 wheelchair_required와
-    동일하게 여기서 하드 필터링합니다 — 사용자가 명시한 시간/거리/난이도 상한이 courses의 실제
-    범위를 완전히 벗어나면 이 함수가 빈 리스트를 반환하고, retrieve_rag_node 가 그 즉시 무조건
-    반려(is_exit_early)합니다.
+    max_time_hours/max_distance_km/allowed_difficulties(2026-07-27 추가)는 wheelchair_required와
+    동일하게 여기서 하드 필터링합니다 — 사용자가 명시한 시간/거리 상한과 허용 난이도 목록의
+    교집합에 해당하는 코스가 courses 에 하나도 없으면 이 함수가 빈 리스트를 반환하고,
+    retrieve_rag_node 가 그 즉시 무조건 반려(is_exit_early)합니다. 난이도가 상한
+    (max_difficulty) 이 아니라 허용 목록인 이유는, "2시간 이내인데 난이도 상" 처럼 시간/거리
+    조건과 난이도 조건이 서로 모순되는 요청을 상한 해석으로는(상한 "상" = 전부 허용) 걸러낼 수
+    없었기 때문입니다.
     """
     query = client.table("courses").select("id")
 
@@ -548,10 +570,9 @@ def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
     if max_distance_km is not None:
         query = query.lte("total_distance_km", max_distance_km)
 
-    max_difficulty = hard.get("max_difficulty")
-    if max_difficulty in _DIFFICULTY_ORDER:
-        allowed = _DIFFICULTY_ORDER[: _DIFFICULTY_ORDER.index(max_difficulty) + 1]
-        query = query.in_("difficulty", allowed)
+    allowed_difficulties = _normalize_allowed_difficulties(hard)
+    if allowed_difficulties:
+        query = query.in_("difficulty", allowed_difficulties)
 
     try:
         res = query.execute()

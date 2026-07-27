@@ -47,6 +47,7 @@ from src.services.db_service import (
     _get_olle_relevant_admin_dongs,
     _looks_like_course_name,
     _normalize_admin_tier_name,
+    _normalize_allowed_difficulties,
     _resolve_stats_region_from_areas,
     _search_culture_knowledge,
 )
@@ -95,6 +96,7 @@ from src.agent.nodes.retriever import (
     _filter_course_ids_by_crop,
     _filter_course_ids_by_location,
     _filter_course_ids_by_target_course,
+    _format_difficulty_labels,
     _split_comma_tokens,
     retrieve_rag_node,
 )
@@ -136,6 +138,7 @@ __all__ = [
     "_get_olle_relevant_admin_dongs",
     "_looks_like_course_name",
     "_normalize_admin_tier_name",
+    "_normalize_allowed_difficulties",
     "_resolve_stats_region_from_areas",
     "_search_culture_knowledge",
     "_build_price_breakdown_str",
@@ -151,6 +154,7 @@ __all__ = [
     "_filter_course_ids_by_crop",
     "_filter_course_ids_by_location",
     "_filter_course_ids_by_target_course",
+    "_format_difficulty_labels",
     "_split_comma_tokens",
     "_COURSE_META_DISPLAY_FIELDS",
     "_MARKET_METRIC_LABELS",

@@ -61,10 +61,10 @@ def _build_quality_comment(report: dict) -> str:
         return "주의 - 세부 사유가 기록되지 않았습니다"
 
     # 마침표 단순 분리(split("."))는 이 코드베이스의 feedback에 흔한 소수점 숫자("4.2km",
-    # "6.0시간")에서 문장이 아니라 숫자 중간이 잘리는 문제가 있어, 문장 종결 부호 뒤에
-    # 공백/줄바꿈이 오는 경우만 문장 경계로 인정합니다("4.2km"처럼 종결부호 뒤에 숫자가 바로
-    # 붙어 있으면 경계로 보지 않음).
-    first_sentence = re.split(r"(?<=[.!?])\s+", feedback, maxsplit=1)[0].strip()
+    # "6.0시간")나 번호 매기기 형식("1. ", "2. ")에서 숫자 중간이나 번호 바로 뒤가 잘리는
+    # 문제가 있어, 마침표 앞이 숫자가 아니면서 문장 종결 부호 뒤에 공백/줄바꿈이 오는 경우만
+    # 문장 경계로 인정합니다 (앞의 문자가 숫자가 아님을 보장하는 (?<=\D[.!?]) 패턴 사용).
+    first_sentence = re.split(r"(?<=\D[.!?])\s+", feedback, maxsplit=1)[0].strip()
     if len(first_sentence) > _QUALITY_COMMENT_MAX_LEN:
         first_sentence = first_sentence[:_QUALITY_COMMENT_MAX_LEN].rstrip() + "…"
     return f"주의 - {first_sentence}"

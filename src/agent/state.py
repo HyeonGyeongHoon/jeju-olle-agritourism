@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, TypedDict, Union
 
 class HardConstraints(TypedDict, total=False):
     """완화가 허용되지 않는 하드 제약. 휠체어 접근성 하나였다가(2026-07-27) 시간/거리/난이도
-    상한 3종이 추가되어 총 4종.
+    조건 3종이 추가되어 총 4종.
 
     채우는 곳: `parse_intent_node` (`nodes/intent.py`) — 정상 경로에서는 LLM JSON
     (`prompts/parse_intent.md` 추출 규칙 1)을 그대로 저장하고, LLM 파싱이 실패한 폴백
@@ -53,9 +53,17 @@ class HardConstraints(TypedDict, total=False):
     두고 있습니다 — 즉 LLM 이 이 키들을 빼먹은 dict 도 실제로 흘러들어올 수 있다는 것을
     코드가 이미 전제하고 있습니다.
 
-    max_time_hours/max_distance_km/max_difficulty 는 모두 "상한(이하 모두 허용)" 의미입니다
-    (2026-07-27 사용자 확정) — max_difficulty="중" 이면 난이도 하/중 코스는 통과하고 상만
-    제외됩니다. 값이 courses 테이블의 실제 범위(현재 실측: estimated_time_hours 2.0~7.0시간,
+    max_time_hours/max_distance_km 는 "상한(이하 모두 허용)" 의미입니다(2026-07-27 사용자 확정).
+
+    난이도는 예전에 max_difficulty(상한 — "중"이면 하/중 허용) 였다가, "2시간 이내인데 극도로
+    어려운 코스"처럼 시간/거리 조건과 난이도 조건이 서로 모순되는 요청을 상한 방식으로는
+    정확히 걸러낼 수 없어서(예: 사용자가 "상"을 원했는데 상한 해석상 하/중까지 통과) 허용
+    난이도 목록 `allowed_difficulties`(예: ["상"], ["하","중"]) 로 대체됐습니다. RDB 필터링
+    시점에 `.in_("difficulty", ...)` 로 정확한 교집합을 적용하므로, 모순된 조합이면 이 시점에
+    0건이 되어 즉시 반려됩니다. 유효 값은 "하"/"중"/"상" 이며(그 외 값은 무시), 특별한 난이도
+    언급이 없으면 None 입니다.
+
+    이 세 필드의 값이 courses 테이블의 실제 범위(현재 실측: estimated_time_hours 2.0~7.0시간,
     total_distance_km 4.2~20.9km)를 완전히 벗어나면 `_execute_rdb_filtering` 필터 결과가
     0건이 되어 `retrieve_rag_node` 가 즉시 반려(is_exit_early)합니다 — wheelchair_required와
     동일한 무조건 반려(Fail-Fast) 파이프라인을 그대로 탑니다.
@@ -64,7 +72,7 @@ class HardConstraints(TypedDict, total=False):
     wheelchair_required: bool
     max_time_hours: float | None
     max_distance_km: float | None
-    max_difficulty: str | None
+    allowed_difficulties: List[str] | None
 
 
 class ParsedConstraints(TypedDict, total=False):

@@ -79,5 +79,14 @@ def test_build_quality_comment_truncates_long_single_sentence():
     assert len(result) < len(long_sentence)
 
 
+def test_build_quality_comment_does_not_split_on_numbered_list():
+    """회귀 방지: 피드백이 '1. 코스 거리가 다릅니다. 2. 소요 시간이 다릅니다.' 처럼 번호 매기기로
+    시작하는 경우 '1.' 뒤에서 잘리면 안 됩니다."""
+    feedback = "1. 코스 거리가 요청 조건과 다릅니다. 2. 난이도가 맞지 않습니다."
+    result = _build_quality_comment({"passed": False, "feedback": feedback})
+    assert result == "주의 - 1. 코스 거리가 요청 조건과 다릅니다."
+
+
 def test_quality_comment_placeholder_constant_is_a_distinctive_marker():
     assert _QUALITY_COMMENT_PLACEHOLDER == "{{QUALITY_COMMENT}}"
+

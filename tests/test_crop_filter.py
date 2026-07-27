@@ -53,17 +53,17 @@ def test_filter_course_ids_by_crop_matches_known_crop():
     assert result_ids == [1]
 
 
-def test_filter_course_ids_by_crop_skips_theme_word_silently():
-    """'밭담'처럼 courses.crops 에 등장하지 않는 비작물 테마어는 필터링을 건너뛰고 원래
-    course_ids 를 그대로 반환해야 함(완화 각주가 뜨면 안 됨)."""
+def test_filter_course_ids_by_crop_fails_on_unknown_crop():
+    """'사과'처럼 courses.crops 에 등장하지 않는 취급하지 않는 작물명은
+    필터링 결과 matched=False 가 되어 즉시 반려되어야 함."""
     client = _make_client(
         all_crops_rows=[{"crops": "쪽파,양파"}, {"crops": "감귤"}],
         filtered_rows=[],
     )
 
-    result_ids, matched = _filter_course_ids_by_crop(client, [1, 2], "밭담")
+    result_ids, matched = _filter_course_ids_by_crop(client, [1, 2], "사과")
 
-    assert matched is True
+    assert matched is False
     assert result_ids == [1, 2]
 
 

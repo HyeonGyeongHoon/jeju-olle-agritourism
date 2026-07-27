@@ -328,15 +328,15 @@ def test_retrieve_rag_node_exits_early_when_max_time_hours_matches_no_course():
     mock_culture.assert_not_called()
 
 
-def test_retrieve_rag_node_exits_early_when_max_difficulty_matches_no_course():
-    """사용자 요청: "난이도 하 코스만" 처럼 요구한 난이도 상한에 맞는 코스가 하나도 없으면
+def test_retrieve_rag_node_exits_early_when_allowed_difficulties_match_no_course():
+    """사용자 요청: "난이도 하 코스만" 처럼 요구한 난이도에 해당하는 코스가 하나도 없으면
     즉시 반려되어야 하며, 사유에 난이도 조건이 구체적으로 언급돼야 합니다."""
     courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
     client = _FakeClient(courses_table, rpc_data=[])
 
     state = _base_state()
     state["parsed_constraints"] = {
-        "hard_constraints": {"max_difficulty": "하"},
+        "hard_constraints": {"allowed_difficulties": ["하"]},
         "vector_query": "난이도 낮은 코스",
     }
 
@@ -346,21 +346,42 @@ def test_retrieve_rag_node_exits_early_when_max_difficulty_matches_no_course():
         result = retrieve_rag_node(state)
 
     assert result["is_exit_early"] is True
-    assert "난이도 '하' 이하" in result["exit_reason"]
+    assert "난이도 '하'인" in result["exit_reason"]
     mock_embed.assert_not_called()
     mock_culture.assert_not_called()
 
 
-def test_retrieve_rag_node_combines_time_and_difficulty_in_zero_match_reason():
-    """시간과 난이도가 동시에 지정되고 둘 다 0건이면, 반려 사유 한 문장에 두 조건이 모두
-    포함돼야 합니다(사용자 예시: "조건에 맞는 난이도 상의 짧은 코스가 존재하지 않습니다")."""
+def test_retrieve_rag_node_zero_match_reason_lists_multiple_allowed_difficulties():
+    """허용 난이도가 여러 개면 반려 사유에 자연스럽게 나열돼야 합니다("난이도 '하' 또는 '중'인").
+    LLM 이 넘긴 순서와 무관하게 쉬운 순서로 정규화된 표기여야 합니다."""
     courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
     client = _FakeClient(courses_table, rpc_data=[])
 
     state = _base_state()
     state["parsed_constraints"] = {
-        "hard_constraints": {"max_time_hours": 1.0, "max_difficulty": "하"},
-        "vector_query": "1시간 이내 난이도 하 코스",
+        "hard_constraints": {"allowed_difficulties": ["중", "하"]},
+        "vector_query": "무난한 코스",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "난이도 '하' 또는 '중'인" in result["exit_reason"]
+
+
+def test_retrieve_rag_node_combines_time_and_difficulty_in_zero_match_reason():
+    """시간과 난이도가 동시에 지정되고 둘 다 0건이면, 반려 사유 한 문장에 두 조건이 모두
+    포함돼야 합니다(사용자 예시: "2시간 이내 극도로 어려운 코스" → 모순된 조합이라 반려)."""
+    courses_table = _FakeCoursesTable(rdb_ids=[], course_meta_by_id={})
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["parsed_constraints"] = {
+        "hard_constraints": {"max_time_hours": 2.0, "allowed_difficulties": ["상"]},
+        "vector_query": "2시간 이내 극도로 어려운 코스",
     }
 
     with patch.object(nodes, "get_supabase_client", return_value=client), \
@@ -369,8 +390,8 @@ def test_retrieve_rag_node_combines_time_and_difficulty_in_zero_match_reason():
         result = retrieve_rag_node(state)
 
     assert result["is_exit_early"] is True
-    assert "1.0시간 이내" in result["exit_reason"]
-    assert "난이도 '하' 이하" in result["exit_reason"]
+    assert "2.0시간 이내" in result["exit_reason"]
+    assert "난이도 '상'인" in result["exit_reason"]
     mock_embed.assert_not_called()
 
 
@@ -395,7 +416,7 @@ def test_retrieve_rag_node_normal_flow_when_time_constraint_is_satisfiable():
 
     state = _base_state()
     state["parsed_constraints"] = {
-        "hard_constraints": {"max_time_hours": 3.0, "max_difficulty": "하"},
+        "hard_constraints": {"max_time_hours": 3.0, "allowed_difficulties": ["하"]},
         "vector_query": "3시간 이내 쉬운 코스",
     }
 
@@ -445,6 +466,42 @@ def test_retrieve_rag_node_describes_target_course_time_mismatch_specifically():
     assert "1.0시간 이내" in result["exit_reason"]
     mock_embed.assert_not_called()
     mock_culture.assert_not_called()
+
+
+def test_retrieve_rag_node_describes_target_course_difficulty_mismatch_specifically():
+    """지정한 코스는 실존하지만 그 코스의 실제 난이도가 요청한 허용 난이도 목록에 없으면
+    ("1코스는 난이도 중인데 사용자는 '상'만 요청"), 상한 초과 문구가 아니라 "난이도 조건에
+    포함되지 않는다"는 목록 기준 문구로 구체적 사유를 반환해야 합니다."""
+    courses_table = _FakeCoursesTableForTargetCourseHardConstraint(
+        rdb_ids=[10],
+        course_rows_by_id={10: {"course_name": "10-1코스", "administrative_areas": "가파리"}},
+        wheelchair_status_by_course_name={},
+    )
+    courses_table.time_difficulty_by_course_name = {
+        "1코스": {
+            "course_name": "1코스", "estimated_time_hours": 4.5,
+            "total_distance_km": 15.1, "difficulty": "중",
+        },
+    }
+    client = _FakeClient(courses_table, rpc_data=[])
+
+    state = _base_state()
+    state["target_course"] = "1코스"
+    state["parsed_constraints"] = {
+        "hard_constraints": {"allowed_difficulties": ["상"]},
+        "vector_query": "1코스 난이도 상",
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]) as mock_embed, \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(state)
+
+    assert result["is_exit_early"] is True
+    assert "1코스" in result["exit_reason"]
+    assert "난이도(중)" in result["exit_reason"]
+    assert "난이도 조건(상)" in result["exit_reason"]
+    mock_embed.assert_not_called()
 
 
 def test_retrieve_rag_node_stops_without_substitution_when_target_course_fails_hard_constraint():
