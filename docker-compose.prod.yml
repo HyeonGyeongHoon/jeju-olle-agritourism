@@ -26,5 +26,6 @@ services:
       - SUPABASE_KEY=${SUPABASE_KEY}
       - UPSTAGE_API_KEY=${UPSTAGE_API_KEY}
       - VISIT_JEJU_API_KEY=${VISIT_JEJU_API_KEY}
+      - BACKEND_URL=http://api:8000
     command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
     restart: always
