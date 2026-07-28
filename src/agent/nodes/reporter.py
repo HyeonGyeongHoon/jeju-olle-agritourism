@@ -143,6 +143,27 @@ _OUT_OF_SCOPE_DECLINE_MSG = (
 )
 
 
+def _build_safety_guide_context_str(chunks: list) -> str:
+    """safety_etiquette_guide 테이블의 안전 수칙 데이터를 카테고리별로 구조화한 텍스트로 빌드합니다."""
+    if not chunks:
+        return ""
+    cat_map = {
+        "safety_rules": "🚨 [안전 수칙]",
+        "etiquette": "💚 [친환경 에티켓]",
+        "recommended_equipment": "🎒 [추천 장비/준비물]",
+        "travel_planning_tips": "📅 [탐방 계획 팁]"
+    }
+    lines = []
+    for cat_key, cat_name in cat_map.items():
+        items = [c["content"] for c in chunks if c["category"] == cat_key]
+        if items:
+            lines.append(f"{cat_name}:")
+            for item in items:
+                lines.append(f"- {item}")
+            lines.append("")
+    return "\n".join(lines).strip()
+
+
 def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     """기획서 생성 없이, 제주 밭담문화·작물 생육 지식과 관광 방문객 통계만 검색해 간결한 정보성
     답변을 빠르게 제공하는 Quick Responder 노드입니다. course_recommendation 을 제외한
@@ -171,6 +192,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         get_chat_completion,
         get_supabase_client,
     )
+    from src.services.db_service import _fetch_safety_etiquette_guide
 
     if state.get("is_exit_early"):
         reason = state.get("exit_reason") or "요청하신 조건에 맞는 코스를 찾지 못했습니다."
@@ -231,12 +253,24 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     # 나올 수 있었습니다(라이브 QA 확인). 작물/테마 신호가 전혀 없는 질의는 통계 정보만으로
     # 간결하게 답해야 하므로, 이 경우 검색 자체를 생략합니다.
     concept_theme = b2b_params.get("concept_theme")
-    should_search_culture = bool(key_item_or_crop) or bool(concept_theme)
+    # concept_theme 이 영농, 밭담, 수확 등 농가 상생 테마와 관련된 경우에만 문화지식을 검색하도록 제한합니다.
+    # 단순 안전 수칙, 준비물 등 일반 질문에서 무관한 작물 정보가 매칭되어 오염되는 것을 방지합니다.
+    is_agro_theme = False
+    if concept_theme:
+        agro_keywords = ["밭담", "농가", "상생", "영농", "수확", "재배", "파종", "작물", "체험", "로컬"]
+        is_agro_theme = any(keyword in concept_theme for keyword in agro_keywords)
+
+    should_search_culture = bool(key_item_or_crop) or is_agro_theme
     culture_chunks = (
         _search_culture_knowledge(client, key_item_or_crop, fallback_query)
         if should_search_culture
         else []
     )
+
+    # 질문에 안전/준비물/에티켓 관련 키워드가 포함되면 안전 및 에티켓 가이드를 함께 불러옵니다.
+    safety_keywords = ["안전", "수칙", "에티켓", "준비물", "장비", "주의", "가이드", "팁", "날씨", "기상"]
+    is_safety_related = any(keyword in query for keyword in safety_keywords)
+    safety_guide_chunks = _fetch_safety_etiquette_guide(client) if is_safety_related else []
 
     market_insight = None
     if include_market_insights:
@@ -284,19 +318,25 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         else:
             course_note += "\n[대상 코스 DB 실측 메타데이터] (조회하지 못했습니다.)"
 
-    if culture_chunks or market_insight or course_meta:
+    safety_section = ""
+    if safety_guide_chunks:
+        safety_guide_context_str = _build_safety_guide_context_str(safety_guide_chunks)
+        safety_section = f"\n\n[안전 및 에티켓 가이드]:\n{safety_guide_context_str}"
+
+    if culture_chunks or market_insight or course_meta or safety_guide_chunks:
         system_prompt = load_prompt("quick_responder.md")
         user_msg = (
             f"[질문]: {query}\n\n"
             f"{culture_section}"
             f"[관광 방문객 통계]:\n{market_context_str}{location_note}{course_note}"
+            f"{safety_section}"
         )
         answer = get_chat_completion(system_prompt, user_msg)
         answer = answer.replace("~", "～")
     else:
         answer = (
-            "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식이나 관광 방문객 통계를 "
-            "찾지 못했습니다. 질문을 조금 더 구체적으로 말씀해 주시면 다시 찾아보겠습니다."
+            "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식, 관광 방문객 통계, "
+            "또는 올레길 안전 가이드 정보를 찾지 못했습니다. 질문을 조금 더 구체적으로 말씀해 주시면 다시 찾아보겠습니다."
         )
 
     # 보완/정정한 검색 조건을 state 에 다시 써서 하류 노드(tool_agent_node)가 같은 값을 보게
@@ -341,8 +381,10 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         _estimate_price_range,
         _resolve_effective_crops,
         get_chat_completion,
+        get_supabase_client,
         get_visit_jeju_recommendations,
     )
+    from src.services.db_service import _fetch_safety_etiquette_guide
 
     query = state["query"]
     chunks = state["retrieved_chunks"]
@@ -359,6 +401,9 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     # 방문 예정월이 질의에 명시되지 않으면 오늘 날짜의 월을 기준으로 제철 여부를 판단합니다
     # (safety_evaluator_node 의 기본값 처리 방식과 동일).
     target_month = b2b_params.get("target_month") or date.today().month
+
+    client = get_supabase_client()
+    safety_guide_chunks = _fetch_safety_etiquette_guide(client)
 
     if not chunks:
         # fallback_reason 이 있으면(예: 지정한 코스가 하드 제약을 만족 못 해 retrieve_rag_node 가
@@ -648,7 +693,21 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     else:
         report += "- **[Plan B (우회/대체)]**: 현재 특이 리스크는 없으나, 돌발 강풍·우천 시를 대비해 단축 동선 및 실내 체험/휴게 프로그램으로의 전환 대안을 상시 준비\n"
 
-    # ## 5. 🛡️ Trust Tagging — 고정 문구가 아니라 이번 리포트에 실제로 쓰인 데이터 출처를
+    # ## 5. 🎒 로컬 안전 탐방 가이드 및 준비물
+    safety_guide_system_prompt = load_prompt("safety_guide.md")
+    safety_guide_context = _build_safety_guide_context_str(safety_guide_chunks)
+    if safety_guide_context:
+        safety_guide_ideas = get_chat_completion(
+            safety_guide_system_prompt,
+            f"[안전 및 에티켓 가이드 데이터]:\n{safety_guide_context}"
+        )
+    else:
+        safety_guide_ideas = "*현재 안전 탐방 가이드 및 준비물 정보가 확인되지 않아 생략합니다.*"
+
+    report += "\n## 5. 🎒 로컬 안전 탐방 가이드 및 준비물\n"
+    report += safety_guide_ideas.strip() + "\n"
+
+    # ## 6. 🛡️ Trust Tagging — 고정 문구가 아니라 이번 리포트에 실제로 쓰인 데이터 출처를
     # 구체적으로 나열합니다(예: "2026년 5월 제주관광공사 이동통신 빅데이터 기반 OO동 방문객
     # 통계"). 로컬 제휴 아이디어는 실 비짓제주 API 응답인지 Mock 폴백인지도 구분해서 밝힙니다 —
     # 방화벽/응답 지연으로 실 API가 막혀 있을 때 실 데이터인 것처럼 표시하면 안 되므로.
@@ -673,6 +732,9 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         else:
             source_labels.append(f"제주 밭담문화·작물 지식 DB({len(culture_chunks)}건)")
 
+    if safety_guide_chunks:
+        source_labels.append("제주 안전·에티켓 가이드 DB")
+
     if market_insight:
         year, month = market_insight["year_month"].split("-")
         source_labels.append(
@@ -696,7 +758,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     # 자신의 평가 결과(passed/feedback)로 만든 한 줄 평으로 치환합니다.
     source_labels.append(f"품질 평가: {_QUALITY_COMMENT_PLACEHOLDER}")
 
-    report += "\n## 5. 🛡️ Trust Tagging\n"
+    report += "\n## 6. 🛡️ Trust Tagging\n"
     report += f"[출처: {' / '.join(source_labels)}]\n"
 
     docent_answer = docent_answer.replace("~", "～")

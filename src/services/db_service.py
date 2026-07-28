@@ -580,3 +580,15 @@ def _execute_rdb_filtering(client: Any, hard: dict) -> List[int]:
     except Exception as e:
         print(f"[!] RDB 필터링 실행 실패: {e}")
         return []
+
+
+def _fetch_safety_etiquette_guide(client: Any) -> List[Dict[str, Any]]:
+    """DB의 safety_etiquette_guide 테이블에서 안전 수칙, 에티켓, 추천 장비, 탐방 팁 등의 전체 가이드 정보를 조회합니다.
+    데이터가 존재하지 않거나 에러 발생 시 빈 리스트를 반환합니다.
+    """
+    try:
+        res = client.table("safety_etiquette_guide").select("category,content").execute()
+        return res.data or []
+    except Exception as e:
+        print(f"[!] safety_etiquette_guide 조회 실패: {e}")
+        return []

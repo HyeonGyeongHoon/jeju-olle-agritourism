@@ -54,14 +54,22 @@ def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
         "alternative_query_override": None
     }
 
-    # 기상 악화 시 대체 안전 경로(내륙 숲길, 우회로)를 추천하도록 쿼리 보정 정보 추가
+    # 기상 악화 시 대체 안전 경로(내륙 숲길, 우회로)를 추천하도록 쿼리 보정 정보 추가 또는 반려 설정
+    is_exit_early = False
+    exit_reason = None
+
     if safety_check["reroute_required"]:
         if weather["status"] == "DANGER":
-            safety_check["alternative_query_override"] = "바람을 피해 걷기 좋은 내륙 숲길 오솔길 코스"
+            # DANGER 등급 기상 악화 시, 우회 코스를 찾지 않고 무조건 반려(Fail-Fast) 처리합니다.
+            is_exit_early = True
+            exit_reason = f"기상 악화({weather['description']})로 인해 안전을 위해 올레길 B2B 상품 기획서를 작성할 수 없습니다."
         else:
             safety_check["alternative_query_override"] = weather.get("guideline") or "해안 도로 대신 바람이 차단된 조용하고 안전한 중산간 올레길 코스"
 
+    print(f"[DEBUG] evaluate_safety_node 리턴 - is_exit_early: {is_exit_early}, exit_reason: {exit_reason}")
     return {
         "weather_info": weather,
-        "safety_check": safety_check
+        "safety_check": safety_check,
+        "is_exit_early": is_exit_early,
+        "exit_reason": exit_reason,
     }

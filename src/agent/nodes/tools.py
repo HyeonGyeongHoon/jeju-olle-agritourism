@@ -179,23 +179,6 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         key_crop = b2b_params.get("key_item_or_crop")
         market_query = b2b_params.get("market_location_query") or {}
 
-        # 도구를 큐잉하기 전에 먼저 확인합니다: quick_responder_node 가 이미 이 질의의 근거
-        # (course_meta/culture_chunks/market_insight)를 확보해 grounded 답변을 만들어뒀다면,
-        # preferred_location/key_item_or_crop 이 여전히 남아있다는 이유만으로 도구를 재호출해
-        # 그 답을 덮어쓰면 안 됩니다. **이 검사는 반드시 아래 pending_tool_calls 계산보다
-        # 먼저 와야 합니다** — quick_responder 가 뭔가를 찾아낸 케이스는 애초에 그 조회에 쓴
-        # preferred_location/key_item_or_crop 이 b2b_params 에 그대로 남아있으므로, 이 검사가
-        # pending_tool_calls 의 조기 return 뒤에 있으면 grounded 케이스에서 사실상 도달 불가능한
-        # 죽은 코드가 됩니다(2026-07-25 라이브 QA로 발견 — "구좌읍 3월 방문객 수는?"에서
-        # quick_responder 가 이미 정확히 조회해둔 3월 값을 무시하고 재호출해, 아래 ym 계산이
-        # market_location_query 에만 의존하는 탓에 월 정보를 잃고 도구가 최신월(5월)로 기본
-        # 폴백한 값으로 답을 덮어씀 + "가상 데이터" 문구까지 섞여 나오는 이중 오류였습니다).
-        has_grounded_answer = bool(
-            state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
-        )
-        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
-            return {"tool_calls": None}
-
         pending_tool_calls = []
         if market_query.get("metric") or preferred_loc:
             loc = preferred_loc or "성산읍"
@@ -225,6 +208,12 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
                 "name": "retrieve_culture_crop_knowledge_tool",
                 "args": {"keyword_or_crop": key_crop}
             })
+
+        # 도구를 큐잉하기 전에 먼저 확인합니다: quick_responder_node 가 이미 이 질의의 근거를
+        # 확보해 답변을 만들어뒀거나, 호출할 도구(pending_tool_calls)가 전혀 없고 기존 답변(final_response)이
+        # 존재한다면 굳이 텅 빈 컨텍스트로 LLM 을 다시 불러 답변을 재생성(환각 오염 우려)하지 않고 그대로 종료합니다.
+        if not is_retry_pass and not pending_tool_calls and state.get("final_response"):
+            return {"tool_calls": None}
 
         if pending_tool_calls:
             return {"tool_calls": pending_tool_calls}

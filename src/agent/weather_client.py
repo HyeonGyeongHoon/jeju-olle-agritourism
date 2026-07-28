@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Dict, Any
 
 from src.agent.llm_client import get_chat_completion
@@ -97,10 +98,13 @@ def assess_weather_risk_from_query(query: str) -> Dict[str, Any]:
     try:
         raw = get_chat_completion(_WEATHER_RISK_SYSTEM_PROMPT, f"[탐방객 질문]: {query}")
         cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
+        
+        # 정규식을 이용해 첫 번째로 등장하는 { ... } 중괄호 쌍을 정확히 추출합니다.
+        # 이로써 LLM 응답 앞뒤에 붙은 마크다운 코드블럭(```json 등)이나 기타 주석 잡음을 완벽히 방어합니다.
+        match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+            
         parsed = json.loads(cleaned.strip())
         status = parsed.get("status") if parsed.get("status") in ("DANGER", "SAFE") else "SAFE"
     except Exception as e:

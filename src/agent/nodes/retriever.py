@@ -87,6 +87,14 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         get_supabase_client,
     )
 
+    # 0. 상류 노드(예: safety_evaluator)에 의해 이미 조기 반려가 선언된 경우 즉시 탈출
+    print(f"[DEBUG] retrieve_rag_node 진입 - state.is_exit_early: {state.get('is_exit_early')}, state.exit_reason: {state.get('exit_reason')}")
+    if state.get("is_exit_early"):
+        return _build_fail_fast_result(
+            state.get("exit_reason") or "안전상의 이유로 기획서를 생성할 수 없습니다.",
+            state.get("market_insight"),
+        )
+
     constraints = state["parsed_constraints"] or {}
     safety = state["safety_check"] or {}
     target_course = state.get("target_course")
