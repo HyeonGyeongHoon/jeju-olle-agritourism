@@ -2,6 +2,7 @@ import json
 import re
 from typing import Any, Dict
 
+# pyrefly: ignore [missing-import]
 from src.agent.llm_client import get_chat_completion
 
 # 월별 제주도 계절 기후 특성 정적 참고 테이블입니다. 실시간 외부 기상 API 호출 없이,

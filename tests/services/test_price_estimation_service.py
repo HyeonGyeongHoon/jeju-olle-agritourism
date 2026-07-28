@@ -9,6 +9,7 @@
 
 import pytest
 
+# pyrefly: ignore [missing-import]
 from src.services.price_estimation_service import (
     _PRICE_ADDON_MAX_COMBOS,
     _PRICE_ADDON_PER_COMBO,

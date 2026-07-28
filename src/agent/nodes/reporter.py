@@ -195,6 +195,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         _search_culture_knowledge,
         get_supabase_client,
     )
+
     # pyrefly: ignore [missing-import]
     from src.services.db_service import _fetch_safety_etiquette_guide
 
@@ -495,6 +496,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         get_supabase_client,
         get_visit_jeju_recommendations,
     )
+
     # pyrefly: ignore [missing-import]
     from src.services.db_service import _fetch_safety_etiquette_guide
 

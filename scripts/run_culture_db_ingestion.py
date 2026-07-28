@@ -21,7 +21,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.ingestion.database_loader import get_supabase_client, get_solar_embedding
+from src.ingestion.database_loader import get_solar_embedding, get_supabase_client
 
 _CULTURE_KNOWLEDGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

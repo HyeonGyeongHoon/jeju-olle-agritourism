@@ -36,7 +36,9 @@ import os
 import re
 from typing import Any, Dict, List
 
+# pyrefly: ignore [missing-import]
 from src.agent.router import _SPECIFIC_COURSE_PATTERN
+# pyrefly: ignore [missing-import]
 from src.ingestion.database_loader import get_solar_embedding
 
 # courses.administrative_areas 는 법정리/법정동(마을 단위, 예: "김녕리") 을, visitor_analytics.

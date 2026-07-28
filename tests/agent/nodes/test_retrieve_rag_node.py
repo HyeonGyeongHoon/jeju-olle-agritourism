@@ -854,3 +854,82 @@ def test_retrieve_rag_node_does_not_match_other_eup_myeon_sharing_a_legal_ri_nam
     mock_embed.assert_not_called()
     mock_culture.assert_not_called()
     assert client.rpc_calls == []
+
+
+class _FakeCoursesTableForCropNormalization:
+    def __init__(self, crops_list, rdb_ids, course_meta_by_id):
+        self.crops_list = crops_list
+        self._rdb_ids = rdb_ids
+        self._course_meta_by_id = course_meta_by_id
+        self._cols = None
+        self._eq_id = None
+
+    def select(self, cols):
+        self._cols = cols
+        return self
+
+    def eq(self, col, value):
+        if col == "id":
+            self._eq_id = value
+        return self
+
+    def in_(self, col, values):
+        return self
+
+    def execute(self):
+        if self._cols == "crops":
+            return SimpleNamespace(data=[{"crops": c} for c in self.crops_list])
+        if self._cols == "id":
+            return SimpleNamespace(data=[{"id": i} for i in self._rdb_ids])
+        if self._cols == "id,crops":
+            return SimpleNamespace(data=[{"id": i, "crops": self._course_meta_by_id[i]["crops"]} for i in self._rdb_ids])
+        meta = self._course_meta_by_id.get(self._eq_id)
+        return SimpleNamespace(data=[meta] if meta else [])
+
+
+def test_retrieve_rag_node_normalizes_crop_name_from_yuchae_flower():
+    """'유채꽃'으로 질의 시 DB에 알려진 작물 태그인 '유채'로 정규화되어,
+    반려되지 않고 정상적으로 기획서 작성이 가능한지 검증합니다."""
+    courses_table = _FakeCoursesTableForCropNormalization(
+        crops_list=["유채", "당근"],
+        rdb_ids=[1],
+        course_meta_by_id={
+            1: {
+                "course_name": "2코스",
+                "crops": "유채",
+                "administrative_areas": "신풍리",
+                "total_distance_km": 10.0,
+                "estimated_time_text": "3시간",
+                "difficulty": "중",
+            }
+        }
+    )
+    client = _FakeClient(
+        courses_table,
+        rpc_data=[
+            {"id": 10, "course_id": 1, "title": "유채꽃 만발 코스", "content": "유채꽃이 아름다운...", "similarity": 0.9}
+        ]
+    )
+
+    state = _base_state()
+    state["b2b_params"] = {
+        "key_item_or_crop": "유채꽃",
+        "preferred_location": None,
+        "target_month": 3,
+        "include_market_insights": False,
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=client), \
+         patch.object(nodes, "get_solar_embedding", return_value=[0.1]), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]):
+        result = retrieve_rag_node(state)
+
+    # 1. Fail-Fast 조기 반려되지 않고 정상 결과가 리턴되었는지 검증
+    assert result.get("is_exit_early") is not True
+    assert len(result["retrieved_chunks"]) == 1
+    assert result["retrieved_chunks"][0]["course_name"] == "2코스"
+    
+    # 2. b2b_params의 key_item_or_crop 이 '유채'로 정규화되었는지 검증
+    assert result.get("b2b_params") is not None
+    assert result["b2b_params"]["key_item_or_crop"] == "유채"
+

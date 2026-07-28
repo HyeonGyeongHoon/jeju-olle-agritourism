@@ -124,6 +124,22 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
 
     client = get_supabase_client()
 
+    # key_item_or_crop 이 알려진 작물 태그에 없지만, 알려진 작물 태그 중 일부가 그 안에 포함되어 있는 경우 (예: "유채" in "유채꽃") 정규화 수행
+    if key_item_or_crop:
+        from src.services.db_service import _get_known_crop_tags
+        known_crop_tags = _get_known_crop_tags(client)
+        if key_item_or_crop not in known_crop_tags:
+            matched_tag = None
+            for tag in sorted(known_crop_tags, key=len, reverse=True):
+                if tag in key_item_or_crop:
+                    matched_tag = tag
+                    break
+            if matched_tag:
+                print(f"[DEBUG] key_item_or_crop 정규화 적용: '{key_item_or_crop}' -> '{matched_tag}'")
+                key_item_or_crop = matched_tag
+                b2b_params = dict(b2b_params)
+                b2b_params["key_item_or_crop"] = key_item_or_crop
+
     # 제주관광공사 방문객 빅데이터(Market Insight) 조회 - 선호 지역/방문월이 있을 때만 시도
     market_insight = None
     if b2b_params.get("include_market_insights", True):
@@ -305,6 +321,7 @@ def retrieve_rag_node(state: AgentState) -> Dict[str, Any]:
         # route_after_retriever 가 반려로 보내버립니다.
         "is_exit_early": False,
         "exit_reason": None,
+        "b2b_params": b2b_params,
     }
 
 

@@ -11,6 +11,7 @@
 
 import os
 import sys
+
 from dotenv import load_dotenv
 
 # 프로젝트 루트 경로를 Python Path 에 추가하여 src 모듈을 정상적으로 인식하게 함
@@ -18,6 +19,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from langsmith import Client
 from langsmith.evaluation import evaluate
+
+# pyrefly: ignore [missing-import]
 from src.agent.graph import agent_runtime
 
 # 1. 환경 변수 로드 (.env)

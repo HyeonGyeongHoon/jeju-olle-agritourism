@@ -2,7 +2,9 @@ import os
 
 import pytest
 
+# pyrefly: ignore [missing-import]
 from src.agent.graph import agent_runtime
+# pyrefly: ignore [missing-import]
 from src.agent.weather_client import assess_weather_risk_from_query
 
 # dummy 환경 변수 설정 시 실제 API 와 DB 가 필요한 시나리오 테스트 건너뛰기
