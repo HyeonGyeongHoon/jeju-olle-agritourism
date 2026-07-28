@@ -1,7 +1,8 @@
 import os
-import requests
 import time
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+import requests
 
 # certifi 번들에 없는 사내/캠퍼스 네트워크 프록시 루트 인증서 문제 대응을 위해
 # OS 신뢰 저장소(Windows/macOS 인증서 스토어)를 사용하도록 전환

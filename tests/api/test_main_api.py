@@ -15,7 +15,6 @@ from src.main import (
     report_event_generator,
 )
 
-
 # --- _verify_api_key ---
 
 def test_verify_api_key_passes_when_no_key_configured(monkeypatch):

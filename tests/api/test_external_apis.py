@@ -3,6 +3,7 @@ import os
 from unittest.mock import patch
 
 from dotenv import load_dotenv
+
 from src.agent import weather_client
 from src.agent.weather_client import assess_weather_risk_from_query, get_seasonal_climate_note
 from src.ingestion.visit_jeju_client import get_visit_jeju_recommendations

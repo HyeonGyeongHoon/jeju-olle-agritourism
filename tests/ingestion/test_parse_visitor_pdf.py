@@ -1,13 +1,13 @@
 import os
+
 import pytest
 
-
 from src.ingestion.parse_visitor_pdf import (
-    _parse_ranked_visitor_lines,
-    _row_to_gender_ratio,
-    _row_to_age_ratio,
-    _is_gender_ratio_table_header,
     _is_age_ratio_table_header,
+    _is_gender_ratio_table_header,
+    _parse_ranked_visitor_lines,
+    _row_to_age_ratio,
+    _row_to_gender_ratio,
     parse_visitor_pdf,
 )
 

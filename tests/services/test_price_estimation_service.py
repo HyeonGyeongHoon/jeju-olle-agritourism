@@ -13,7 +13,6 @@ from src.services.price_estimation_service import (
     _PRICE_ADDON_MAX_COMBOS,
     _PRICE_ADDON_PER_COMBO,
     _PRICE_BASE_FLAT,
-    _PRICE_BASE_RATE_PER_HOUR,
     _PRICE_DIFFICULTY_MULTIPLIER,
     _PRICE_GROUP_SIZE_BY_AUDIENCE,
     _PRICE_GUIDE_DAILY,

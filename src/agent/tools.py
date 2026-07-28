@@ -1,14 +1,11 @@
-import os
 import re
-import csv
-from datetime import date
-from typing import Any, Dict, List
-from src.ingestion.database_loader import get_supabase_client
+
 from src.agent.nodes import _MARKET_METRIC_LABELS
+from src.ingestion.database_loader import get_supabase_client
 from src.services.db_service import (
-    _get_olle_relevant_admin_dongs,
     _get_latest_available_year_month,
-    _search_culture_knowledge
+    _get_olle_relevant_admin_dongs,
+    _search_culture_knowledge,
 )
 
 

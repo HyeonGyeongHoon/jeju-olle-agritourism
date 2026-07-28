@@ -1,5 +1,7 @@
 import os
+
 import pytest
+
 from src.agent.tools import retrieve_visitor_statistics_tool
 
 # dummy 환경 변수 설정 시 실제 Supabase DB 조회가 필요한 통계 테스트 건너뛰기

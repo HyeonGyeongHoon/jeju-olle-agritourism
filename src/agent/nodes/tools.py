@@ -28,8 +28,8 @@ def tool_executor_node(state: AgentState) -> Dict[str, Any]:
     tool_depth 카운터를 1 증가시켜 무한 루프를 방어합니다.
     """
     from src.agent.tools import (
-        retrieve_visitor_statistics_tool,
         retrieve_culture_crop_knowledge_tool,
+        retrieve_visitor_statistics_tool,
     )
 
     tool_calls = state.get("tool_calls") or []

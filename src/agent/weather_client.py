@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, Any
+from typing import Any, Dict
 
 from src.agent.llm_client import get_chat_completion
 

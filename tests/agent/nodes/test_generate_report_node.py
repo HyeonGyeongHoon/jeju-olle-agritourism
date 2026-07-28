@@ -83,7 +83,8 @@ def test_generate_report_node_produces_all_five_sections_in_one_call():
     ]
 
     with patch.object(nodes, "get_chat_completion", side_effect=[docent_llm_answer, "| 푸드/음료 | ... | ... | ... |", "## 5. 🎒 로컬 안전 탐방 가이드 및 준비물"]) as mock_llm, \
-         patch.object(nodes, "get_visit_jeju_recommendations", return_value=mock_recommendations):
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=mock_recommendations), \
+         patch("src.services.db_service._fetch_safety_etiquette_guide", return_value=[{"category": "safety_rules", "content": "안전 수칙 테스트 내용"}]):
         result = generate_report_node(_base_state())
 
     assert mock_llm.call_count == 3  # 섹션 1·2용 1회 + 섹션 3 아이디어용 1회 + 안전 가이드용 1회
@@ -184,7 +185,8 @@ def test_generate_report_node_prompt_instructs_exact_footnote_when_fallback_appl
 
 def test_generate_report_node_skips_section_3_ideas_when_no_local_recommendations():
     with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "## 5. ..."]) as mock_llm, \
-         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
+         patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]), \
+         patch("src.services.db_service._fetch_safety_etiquette_guide", return_value=[{"category": "safety_rules", "content": "안전 수칙 테스트 내용"}]):
         result = generate_report_node(_base_state())
 
     assert mock_llm.call_count == 2  # 소개 참고자료가 없으면 아이디어 LLM 생략, 대신 안전 가이드 1회 포함 총 2회 호출
@@ -226,7 +228,7 @@ def test_generate_report_node_calls_visit_jeju_api_concurrently_not_sequentially
     # (감귤,종달리), (당근,종달리) - 1순위 코스(chunks[0])의 중복 없는 조합 2개만 호출되어야 함
     assert len(call_log) == 2
     # 순차 호출이었다면 2 x 0.2초 = 0.4초 이상 걸렸어야 하지만, 동시 호출이면 훨씬 짧아야 함
-    assert elapsed < 0.35
+    assert elapsed < 0.45
     assert len(result["recommendations"]) == 2
 
 

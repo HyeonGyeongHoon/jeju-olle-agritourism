@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+
 from dotenv import load_dotenv
 
 # 프로젝트 루트 디렉토리를 path에 추가하여 src 모듈을 정상적으로 import할 수 있도록 함

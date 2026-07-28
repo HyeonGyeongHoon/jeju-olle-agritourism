@@ -1,6 +1,7 @@
 import json
 import os
 import re
+
 import pytest
 
 EXTRACTED_JSON_PATH = os.path.join("data", "extracted", "course_detail_texts.json")
