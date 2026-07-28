@@ -357,6 +357,7 @@ def _describe_hard_constraint_zero_match(hard: dict) -> str | None:
     비어있는 경우) 원인을 특정할 수 없으므로 None 을 반환해 호출부가 일반 문구를 쓰게 합니다 —
     `_describe_target_course_mismatch` 와 동일한 설계입니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import _normalize_allowed_difficulties
 
     conditions = []
@@ -394,6 +395,7 @@ def _describe_target_course_mismatch(client: Any, target_course: str, hard: dict
     테스트 픽스처를 건드리지 않기 위함입니다(2개 조건이 동시에 걸리면 질의도 2번 나가지만,
     이 함수는 fail-fast 반려 경로에서만 호출되는 드문 경로라 감내할 수 있는 비용입니다).
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import _normalize_allowed_difficulties
 
     reasons = []
@@ -494,6 +496,7 @@ def _course_row_matches_location(row: Dict[str, Any], preferred_location: str) -
     4) eup_myeon_dong_areas 가 비어있는(NULL/빈 문자열 — 백필 전이거나 신규 추가된) 행에
        한해서만 예전 법정리 역확장 매칭으로 폴백합니다. 과도기 방어용 경로입니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _ADMIN_DONG_TO_LEGAL_DONGS,
         _normalize_admin_tier_name,
@@ -579,6 +582,7 @@ def _filter_course_ids_by_crop(
     (완전 배제 대신) 원래 course_ids 를 그대로 반환하고 False 를 반환해, 호출부가 "작물 조건을
     해제하고 검색했다"는 사유를 리포트에 남길 수 있게 합니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _get_known_crop_tags,
     )

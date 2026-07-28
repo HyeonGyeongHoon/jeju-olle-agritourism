@@ -58,9 +58,11 @@ def _josa_ro(word: str) -> str:
     return "로" if jongseong in (0, 8) else "으로"
 
 
-def _build_course_meta_context_str(course_meta: Dict[str, Any] | None) -> str:
+def _build_course_meta_context_str(course_meta: Dict[str, Any] | None, include_crops: bool = True) -> str:
     """코스 메타데이터를 LLM 프롬프트에 넣을 "라벨: 값" 목록 문자열로 만듭니다. 값이 없는
     필드는 아예 넣지 않아, LLM 이 빈 값을 보고 추측으로 메우지 않도록 합니다.
+    include_crops=False 면 대표 재배 작물 항목을 제외하며, 작물·농업 키워드가 없는 순수
+    코스 스펙 질의 시 LLM 이 crops 필드를 보고 자체적으로 제철·체험 정보를 생성하는 것을 방지합니다.
     """
     if not course_meta:
         return ""
@@ -70,9 +72,10 @@ def _build_course_meta_context_str(course_meta: Dict[str, Any] | None) -> str:
         if value in (None, ""):
             continue
         lines.append(f"- {label}: {value}{unit}")
-    crops = (course_meta.get("crops") or "").strip()
-    if crops:
-        lines.append(f"- 대표 재배 작물: {crops}")
+    if include_crops:
+        crops = (course_meta.get("crops") or "").strip()
+        if crops:
+            lines.append(f"- 대표 재배 작물: {crops}")
     areas = (course_meta.get("administrative_areas") or "").strip()
     if areas:
         lines.append(f"- 경유 행정구역: {areas}")
@@ -183,22 +186,23 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     "코스는 못 찾았지만 대신 이런 정보가 있다"는 식의 사실상 대체 추천이 되고, quality_checker 가
     그 무관한 컨텍스트와 반려 메시지를 대조하며 재작성 루프를 돌게 됩니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _fetch_course_meta_by_name,
         _fetch_market_insight,
         _looks_like_course_name,
         _resolve_stats_region_from_areas,
         _search_culture_knowledge,
-        get_chat_completion,
         get_supabase_client,
     )
+    # pyrefly: ignore [missing-import]
     from src.services.db_service import _fetch_safety_etiquette_guide
 
     if state.get("is_exit_early"):
         reason = state.get("exit_reason") or "요청하신 조건에 맞는 코스를 찾지 못했습니다."
         # 문구는 generate_report_node 의 `if not chunks:` 반려 분기와 동일한 형태로 통일합니다.
         msg = f"요청하신 조건으로는 기획서를 작성할 수 없습니다. {reason}"
-        return {"docent_answer": msg, "final_response": msg}
+        return {"docent_answer": msg, "final_response": msg, "skip_quality_check": True}
 
     if state.get("intent_category") == IntentCategory.OTHER.value:
         return {
@@ -206,6 +210,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             "market_insight": None,
             "docent_answer": _OUT_OF_SCOPE_DECLINE_MSG,
             "final_response": _OUT_OF_SCOPE_DECLINE_MSG,
+            "skip_quality_check": True,
         }
 
     query = state["query"]
@@ -218,6 +223,10 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     include_market_insights = b2b_params.get("include_market_insights", True)
     location_resolution = b2b_params.get("market_location_resolution")
     fallback_query = constraints.get("vector_query") or query
+
+    # 질문에 통계 관련 키워드가 포함되었는지 확인합니다 (지역 정밀화 및 통계 조회 판단용)
+    stats_keywords = ["통계", "방문객", "인구", "사람", "수치", "방문", "수", "인원", "트래픽"]
+    is_stats_related = any(kw in query for kw in stats_keywords)
 
     client = get_supabase_client()
 
@@ -235,10 +244,24 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     if _looks_like_course_name(preferred_location):
         preferred_location = None
 
+    # 질문에 작물·농업·문화 관련 키워드가 있을 때만 문화지식 검색을 허용합니다.
+    # 코스 메타에서 작물명을 자동 보완하는 로직도 이 조건 내에서만 동작해야 합니다.
+    # "소요시간 알려줘"처럼 순수 코스 스펙 질의 시에는 작물명이 조용히 채워져
+    # should_search_culture=True 가 되어 무관한 농작물 문화지식이 주입되는 것을 방지합니다.
+    agro_query_keywords = [
+        "작물", "감귤", "감자", "당근", "마늘", "양파", "무", "파", "배추", "보리", "밭담",
+        "농가", "상생", "영농", "수확", "재배", "파종", "체험", "제철", "로컬", "농업"
+    ]
+    is_query_agro_related = any(kw in query for kw in agro_query_keywords)
+
     if course_meta:
-        if not key_item_or_crop:
+        # 질문에 작물/농업 키워드가 있을 때만 코스 메타의 재배작물로 key_item_or_crop 을 보완합니다.
+        # 순수 코스 스펙(소요시간/난이도 등) 질의에서는 작물명 자동 채움을 생략합니다.
+        if not key_item_or_crop and is_query_agro_related:
             key_item_or_crop = (course_meta.get("crops") or "").split(",")[0].strip() or None
-        if not preferred_location:
+        # 질문에 통계 관련 키워드가 포함되었을 때만 지역 매핑(법정동-행정동 변환) 작업을 수행합니다.
+        # 단순 코스 스펙(소요시간/난이도 등) 질문 시에는 이 무거운 DB 조회를 건너뜁니다 (초경량 Fast Path).
+        if not preferred_location and is_stats_related:
             # administrative_areas 는 법정리/법정동 단위라 visitor_analytics.region_dong
             # (행정동/읍·면)과 계층이 달라 그대로 쓰면 통계 조회가 또 실패합니다. 통계 조회가
             # 가능한 행정동/읍·면으로 변환해서만 채우고, 변환할 수 없으면 비워 둡니다.
@@ -273,7 +296,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
     safety_guide_chunks = _fetch_safety_etiquette_guide(client) if is_safety_related else []
 
     market_insight = None
-    if include_market_insights:
+    if include_market_insights and is_stats_related:
         # target_month(위에서 today() 로 기본값 처리된 값)를 그대로 넘기지 않고 질의가 실제로
         # 지정한 월(b2b_params 원본, 없으면 None)만 넘깁니다 — "최근 방문객 수는?"처럼 월이
         # 없는 질의에서 "오늘 날짜의 달"을 강제하면, DB 적재 범위가 이번 달까지 아닐 때 실제로는
@@ -281,68 +304,155 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         # 월 필터 없이 해당 지역의 최신 데이터를 가져옵니다.
         market_insight = _fetch_market_insight(client, preferred_location, b2b_params.get("target_month"))
 
-    # should_search_culture 가 False 면 검색을 아예 하지 않았으므로, "찾지 못했다"는 문구조차
-    # 프롬프트에 넣지 않습니다 — 시도하지 않은 검색을 실패한 것처럼 언급하면 LLM 이 그 문구에
-    # 반응해 불필요한 사족을 답변에 덧붙일 수 있습니다. culture_section 자체를 통째로 생략해
-    # 순수 통계 질의에 더 간결한 프롬프트를 구성합니다.
-    culture_section = ""
-    if should_search_culture:
-        culture_context_str = _build_culture_context_str(culture_chunks, target_month)
-        if not culture_context_str:
-            culture_context_str = "(관련 문화/작물 지식 문서를 찾지 못했습니다.)"
-        culture_section = f"[문화·작물 지식 검색 결과]:\n{culture_context_str}\n\n"
-
-    market_context_str = _build_market_insight_summary_str(market_insight) or "(관련 관광 방문객 통계를 찾지 못했습니다.)"
-
-    location_note = ""
-    if location_resolution:
-        metric_label = _MARKET_METRIC_LABELS.get(
-            location_resolution.get("metric"), location_resolution.get("metric")
-        )
-        location_note = (
-            f"\n[지역 자동 선정 근거] '{location_resolution.get('region_dong')}'은 "
-            f"{location_resolution.get('year_month')} 기준 {metric_label} 1위 지역으로 자동 선정되었습니다."
-        )
-
     # 코스가 지목된 질의는 코스명 라벨만 넘기지 않고 DB 실측치(거리/소요시간/난이도/시작·종점)를
     # 함께 넘깁니다. 라벨만 넘겼을 때 LLM 이 "비교적 평탄해 초보자도 좋다"처럼 DB 근거 없는
     # 추측으로 적합성을 단정하는 문제가 라이브 QA에서 확인됐습니다(2026-07-25).
     course_note = ""
     if target_course:
-        course_note = f"\n\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
-        course_meta_context_str = _build_course_meta_context_str(course_meta)
+        course_note = f"[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
+        # 작물·농업 관련 질문이 아닌 경우 코스 메타에서 crops 필드를 제외합니다.
+        # LLM 이 crops 필드를 보고 자체적으로 제철·체험 정보를 생성하는 오염을 차단합니다.
+        course_meta_context_str = _build_course_meta_context_str(course_meta, include_crops=is_query_agro_related)
         if course_meta_context_str:
             course_note += (
                 f"\n[대상 코스 DB 실측 메타데이터]\n{course_meta_context_str}"
             )
         else:
             course_note += "\n[대상 코스 DB 실측 메타데이터] (조회하지 못했습니다.)"
+        course_note += "\n\n"
 
-    safety_section = ""
-    if safety_guide_chunks:
-        safety_guide_context_str = _build_safety_guide_context_str(safety_guide_chunks)
-        safety_section = f"\n\n[안전 및 에티켓 가이드]:\n{safety_guide_context_str}"
+    # _build_safety_guide_context_str 는 빈 리스트를 받으면 "" 를 반환하므로 조건문 없이 항상
+    # 호출해도 안전합니다 - 이후 섹션 4 조립부의 참조가 possibly-unbound 가 되는 것도 방지합니다.
+    safety_guide_context_str = _build_safety_guide_context_str(safety_guide_chunks)
 
-    if culture_chunks or market_insight or course_meta or safety_guide_chunks:
-        system_prompt = load_prompt("quick_responder.md")
-        user_msg = (
-            f"[질문]: {query}\n\n"
-            f"{culture_section}"
-            f"[관광 방문객 통계]:\n{market_context_str}{location_note}{course_note}"
-            f"{safety_section}"
+    answer_parts = []
+
+    # 1. 대상 코스 상세 스펙 및 B2B 가이드 조립
+    if target_course and course_meta:
+        c_meta = course_meta
+        course_name = c_meta.get("course_name")
+        total_distance = c_meta.get("total_distance_km")
+        estimated_time = c_meta.get("estimated_time_text") or (
+            f"{c_meta.get('estimated_time_hours')}시간" if c_meta.get("estimated_time_hours") is not None else None
         )
-        answer = get_chat_completion(system_prompt, user_msg)
-        answer = answer.replace("~", "～")
+        difficulty = c_meta.get("difficulty")
+        start_point = c_meta.get("start_point")
+        end_point = c_meta.get("end_point")
+        admin_areas = c_meta.get("administrative_areas") or ""
+        crops = c_meta.get("crops") or ""
+
+        # 실제 값이 존재하는 필드만 명사구 불릿 형태로 조립합니다.
+        specs = []
+        if course_name:
+            specs.append(f"- 코스명: {course_name}")
+        if total_distance is not None:
+            specs.append(f"- 총 거리: {total_distance}km")
+        if estimated_time:
+            specs.append(f"- 예상 소요시간: {estimated_time} 내외")
+        if difficulty:
+            specs.append(f"- 난이도: {difficulty}")
+        if start_point:
+            specs.append(f"- 시작점: {start_point}")
+        if end_point:
+            specs.append(f"- 종점: {end_point}")
+        if admin_areas:
+            specs.append(f"- 경유 행정구역: {admin_areas}")
+
+        specs_str = "\n".join(specs)
+        course_str = (
+            f"[대상 코스 상세 스펙]\n"
+            f"{specs_str}"
+        )
+        
+        guidelines = []
+        if estimated_time:
+            guidelines.append(f"- {course_name} 의 예상 소요시간({estimated_time}) 및 지형 특성을 고려하여, 4시간 내외 빠른 이동 그룹과 5시간 이상 경관 체험 그룹을 구분한 맞춤형 타임테이블 수립 권장.")
+        if difficulty:
+            guidelines.append(f"- 난이도 '{difficulty}' 및 도보 환경을 고려하여 단체 탐방객 대상 체력 분배 가이드라인 마련 및 코스 내 적정 휴식 지점(쉼터 등) 배치 계획 수립 필요.")
+        if crops and is_query_agro_related:
+            guidelines.append(f"- 대표 재배 작물인 '{crops}' 과 연계한 제철 농가 체험(수확/시식 등) 프로그램 연계 기획 시, 해당 작물의 생육 시기 및 수확 월(시즌 가이드) 사전 확인 필수.")
+
+        if guidelines:
+            course_str += "\n\n[B2B 관광 상품 설계 지침]\n" + "\n".join(guidelines)
+            
+        answer_parts.append(course_str)
+
+    # 2. 관광 방문객 통계 분석 조립
+    if market_insight:
+        m_in = market_insight
+        region = m_in.get("region_dong")
+        ym = m_in.get("year_month")
+        total_v = m_in.get("total_visitors") or 0
+        yoy = m_in.get("yoy_growth_rate")
+        female = m_in.get("female_ratio")
+        male = m_in.get("male_ratio")
+
+        stats_str = (
+            f"[방문객 빅데이터 및 트래픽 분석]\n"
+            f"- 기준 지역 및 월: {region} ({ym} 기준)\n"
+            f"- 월간 총 방문객 수: {total_v:,}명"
+        )
+        if yoy is not None:
+            stats_str += f"\n- 전년 동월 대비 증감률: {yoy * 100:.1f}%"
+        if female is not None and male is not None:
+            stats_str += f"\n- 성비 구성: 여성 {female * 100:.1f}% / 남성 {male * 100:.1f}%"
+
+        if location_resolution:
+            # 전역 변수인 _MARKET_METRIC_LABELS 를 직접 사용합니다.
+            metric_label = _MARKET_METRIC_LABELS.get(
+                location_resolution.get("metric"), location_resolution.get("metric")
+            )
+            stats_str += (
+                f"\n- [지역 자동 선정 근거]: '{location_resolution.get('region_dong')}'은 "
+                f"{location_resolution.get('year_month')} 기준 {metric_label} 1위 지역으로 자동 선정됨."
+            )
+
+        stats_str += (
+            f"\n\n[통계 기반 상품 설계 권장 사항]\n"
+            f"- 월간 {total_v:,}명 수준의 통계 수치를 고려하여, 다중 밀집 구역 내 안전 요원 배치 상태 파악 및 비상 대피 통로 확보 가이드 수립 필요."
+        )
+        if yoy is not None and yoy > 0:
+            stats_str += f"\n- 전년 대비 방문객 증가 추세({yoy * 100:.1f}% 증가)를 반영한 주차난 해소 및 셔틀버스 증편 계획 수립 권장."
+
+        answer_parts.append(stats_str)
+
+    # 3. 제주 로컬 문화 및 작물 지식 RAG 조립
+    if should_search_culture and culture_chunks:
+        culture_str = "[제주 로컬 문화 및 작물 지식 가이드]"
+        for i, chunk in enumerate(culture_chunks):
+            title = chunk.get("title")
+            content = chunk.get("content")
+            crop_name = chunk.get("target_crop") or chunk.get("crop_name")
+            active_months = chunk.get("active_months")
+            
+            culture_str += f"\n- {title}: {content}"
+            if crop_name and active_months:
+                in_season = target_month in active_months
+                months_str = ",".join(str(m) for m in sorted(active_months))
+                season_status = "제철" if in_season else "제철 아님"
+                culture_str += f"\n  (작물: {crop_name} / 제철 시기: {months_str}월 / 현재 예정월 {target_month}월 기준 {season_status} 상태 반영 필요)"
+        answer_parts.append(culture_str)
+
+    # 4. 안전 및 에티켓 지침 조립
+    if safety_guide_chunks:
+        safety_str = (
+            f"[안전 탐방 및 준비물 관리 수칙]\n"
+            f"{safety_guide_context_str}\n\n"
+            f"[운영 준비물 및 비상 대응 지침]\n"
+            f"- 사전 준비 단계에서 여행지, 숙박시설, 교통수단의 안전성을 사전에 철저히 조사할 것.\n"
+            f"- 경찰서, 소방서, 인근 병원 등과의 비상 연락망을 필히 확보하고 현장 관리용 구급약 및 비상 용품 구비 상태 점검 권장."
+        )
+        answer_parts.append(safety_str)
+
+    if answer_parts:
+        answer = "\n\n".join(answer_parts).strip().replace("~", "～")
     else:
         answer = (
             "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식, 관광 방문객 통계, "
             "또는 올레길 안전 가이드 정보를 찾지 못했습니다. 질문을 조금 더 구체적으로 말씀해 주시면 다시 찾아보겠습니다."
         )
 
-    # 보완/정정한 검색 조건을 state 에 다시 써서 하류 노드(tool_agent_node)가 같은 값을 보게
-    # 합니다. 이게 없으면 이 노드는 지역 오염을 로컬 변수에서만 고치고, tool_agent_node 는
-    # 여전히 state 의 b2b_params.preferred_location(='1코스')을 읽어 통계 도구를 잘못된 지역으로
-    # 호출합니다 — 상류 노드의 결정을 하류 노드가 뒤엎는 이 프로젝트의 전형적 경계면 버그입니다.
+    # 보완/정정한 검색 조건을 state 에 다시 써서 하류 노드(tool_agent_node)가 같은 값을 보게 합니다.
     updated_b2b_params = {
         **b2b_params,
         "key_item_or_crop": key_item_or_crop,
@@ -374,6 +484,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     매장명/주소/전화번호는 결과물에 노출하지 않고 지역 상점의 성격(introduction)만 아이디어의
     참고 재료로 사용합니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _QUALITY_COMMENT_PLACEHOLDER,
         _SELF_RAG_STARS_PLACEHOLDER,
@@ -384,6 +495,7 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
         get_supabase_client,
         get_visit_jeju_recommendations,
     )
+    # pyrefly: ignore [missing-import]
     from src.services.db_service import _fetch_safety_etiquette_guide
 
     query = state["query"]
@@ -569,9 +681,25 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     else:
         fallback_note_rule_str = "- 조건 완화 각주는 추가하지 마세요. 표로 섹션을 바로 종료하세요."
 
+    # 휠체어 요구사항 발생 시, 동적 휠체어 전용 구간 매핑 지침 정의
+    # (state["parsed_constraints"] 는 필수 키이지만 값 자체가 None 일 수 있는 Optional 필드라,
+    # dict.get(key, {}) 의 기본값은 "키가 없을 때"만 적용되고 "값이 None"인 경우는 구제하지
+    # 못합니다 - 이 파일의 다른 곳(quick_responder_node)과 동일하게 `or {}` 로 널 안전하게 처리합니다.)
+    hard = (state.get("parsed_constraints") or {}).get("hard_constraints", {})
+    if hard.get("wheelchair_required"):
+        wheelchair_guideline_str = (
+            "※ 중요(휠체어 전용 구간): 본 상품은 휠체어 이용자를 위한 특수 기획 상품입니다. "
+            "타임라인(## 2. 📍) 및 주요 도슨트 해설을 구성할 때 비포장 흙길, 오름 등 휠체어 진입이 불가능한 위험 구간을 전면 배제하십시오. "
+            "반드시 포장(우레탄/아스팔트/보도블록)이 확보된 휠체어 전용 보행 구간(종달리 옛 소금밭 ~ 성산갑문 입구)으로 동선을 국한하고, "
+            "흙길 진입을 권장하는 유인 문구를 일절 작성하지 마십시오."
+        )
+    else:
+        wheelchair_guideline_str = ""
+
     system_prompt = load_prompt("generate_report.md").format(
         weather_description=weather.get('description', ''),
         weather_warnings=', '.join(weather.get('warnings', [])) or '없음',
+        wheelchair_guideline_str=wheelchair_guideline_str,
         culture_context_str=culture_context_str,
         segments_str=segments_str,
         market_insight_context_str=market_insight_context_str,
@@ -697,9 +825,24 @@ def generate_report_node(state: AgentState) -> Dict[str, Any]:
     safety_guide_system_prompt = load_prompt("safety_guide.md")
     safety_guide_context = _build_safety_guide_context_str(safety_guide_chunks)
     if safety_guide_context:
+        weather_description = weather.get("description", "정보 없음")
+        safety_status = safety.get("safety_status", "SAFE")
+        weather_guideline = weather.get("guideline", "특별한 기상 리스크가 없습니다.")
+        
+        weather_context_str = (
+            f"- 방문 예정 월: {target_month}월\n"
+            f"- 기상 상태: {weather_description} (리스크 단계: {safety_status})\n"
+            f"- 기상 및 동선 가이드라인: {weather_guideline}"
+        )
+        
+        user_message = (
+            f"[안전 및 에티켓 가이드 데이터]:\n{safety_guide_context}\n\n"
+            f"[현재 탐방 계절 및 기상 상황 정보]:\n{weather_context_str}"
+        )
+        
         safety_guide_ideas = get_chat_completion(
             safety_guide_system_prompt,
-            f"[안전 및 에티켓 가이드 데이터]:\n{safety_guide_context}"
+            user_message
         )
     else:
         safety_guide_ideas = "*현재 안전 탐방 가이드 및 준비물 정보가 확인되지 않아 생략합니다.*"

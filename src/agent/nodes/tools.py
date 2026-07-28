@@ -27,6 +27,7 @@ def tool_executor_node(state: AgentState) -> Dict[str, Any]:
     다중/병렬 실행하고 결과를 tool_outputs 에 축적하는 Tool Executor 노드입니다.
     tool_depth 카운터를 1 증가시켜 무한 루프를 방어합니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.tools import (
         retrieve_culture_crop_knowledge_tool,
         retrieve_visitor_statistics_tool,
@@ -98,6 +99,7 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
     **보다 먼저** 있어야 합니다(has_grounded_answer 검사가 그 뒤에 있어 죽은 코드가 됐던 과거
     버그와 동일한 함정 — 반려 케이스는 곧 필터 값이 b2b_params 에 살아있는 케이스입니다).
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _build_course_meta_context_str,
         get_chat_completion,
@@ -140,8 +142,17 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
     course_scope_note = ""
     target_course = state.get("target_course")
     if target_course:
+        query_for_agro_check = state.get("query") or ""
+        agro_query_keywords = [
+            "작물", "감귤", "감자", "당근", "마늘", "양파", "무", "파", "배추", "보리", "밭담",
+            "농가", "상생", "영농", "수확", "재배", "파종", "체험", "제철", "로컬", "농업"
+        ]
+        _is_query_agro_related = any(kw in query_for_agro_check for kw in agro_query_keywords)
+        
         course_scope_note = f"\n[대상 코스] 이 질문은 '{target_course}' 코스에 대한 것입니다."
-        course_meta_context_str = _build_course_meta_context_str(state.get("course_meta"))
+        course_meta_context_str = _build_course_meta_context_str(
+            state.get("course_meta"), include_crops=_is_query_agro_related
+        )
         if course_meta_context_str:
             course_scope_note += (
                 f"\n[대상 코스 DB 실측 메타데이터 (적합성·난이도 판단은 이 수치만 근거로 인용)]\n"
@@ -182,8 +193,11 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         has_grounded_answer = bool(
             state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
         )
-        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
-            return {"tool_calls": None}
+        is_other_intent = state.get("intent_category") == "other"
+        if not is_retry_pass and (state.get("skip_quality_check") or is_other_intent or (has_grounded_answer and state.get("final_response"))):
+            # quality_checker(Self-RAG LLM 검증)를 건너뜁니다.
+            # 이미 상류 노드에서 반려/외부 질문으로 처리되었거나 근거 기반 답변이 구성되었으므로 재검증이 불필요합니다.
+            return {"tool_calls": None, "skip_quality_check": True}
 
         pending_tool_calls = []
         if market_query.get("metric") or preferred_loc:

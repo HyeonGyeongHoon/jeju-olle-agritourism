@@ -26,7 +26,7 @@ def _base_state(**b2b_overrides):
     }
     b2b_params.update(b2b_overrides)
     return {
-        "query": "제주 밭담문화가 뭐야?",
+        "query": "제주 밭담문화와 관광객 통계가 뭐야?",
         "parsed_constraints": {"vector_query": "밭담문화"},
         "b2b_params": b2b_params,
     }
@@ -109,14 +109,11 @@ def test_quick_responder_node_builds_answer_from_culture_and_market():
             "active_months": None,
         }
     ]
-    # key_item_or_crop(또는 concept_theme)이 있어야 문화지식 검색이 실행됩니다
-    # (2026-07-27: 작물/테마 신호가 전혀 없으면 검색 자체를 생략하도록 변경 — 아래
-    # test_quick_responder_node_skips_culture_search_* 참고).
     market_insight = {
         "region_dong": "구좌읍",
         "year_month": "2026-05",
         "total_visitors": 12000,
-        "yoy_growth_rate": 5.2,
+        "yoy_growth_rate": 0.052,
         "female_ratio": None,
         "male_ratio": None,
         "youth_10s_ratio": None,
@@ -128,24 +125,17 @@ def test_quick_responder_node_builds_answer_from_culture_and_market():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=culture_chunks) as mock_search_culture, \
-         patch.object(nodes, "_fetch_market_insight", return_value=market_insight), \
-         patch.object(nodes, "get_chat_completion", return_value="제주 밭담문화는...") as mock_llm:
+         patch.object(nodes, "_fetch_market_insight", return_value=market_insight):
         result = quick_responder_node(
             _base_state(preferred_location="구좌읍", key_item_or_crop="밭담")
         )
 
     assert result["culture_chunks"] == culture_chunks
     assert result["market_insight"] == market_insight
-    assert result["docent_answer"] == "제주 밭담문화는..."
-    assert result["final_response"] == "제주 밭담문화는..."
+    assert "제주의 밭담은 화산석으로 쌓은 경계 담이다." in result["final_response"]
+    assert "12,000명" in result["final_response"]
     assert "retrieved_chunks" not in result
-
     mock_search_culture.assert_called_once()
-    mock_llm.assert_called_once()
-    # 검색된 작물/문화 지식 텍스트가 실제로 LLM 프롬프트에 넘어갔는지 확인
-    system_prompt, user_msg = mock_llm.call_args[0]
-    assert "제주의 밭담은 화산석으로 쌓은 경계 담이다." in user_msg
-    assert "12,000명" in user_msg
 
 
 # --- 작물/테마 신호 없는 순수 통계 질의는 문화지식 검색 자체를 생략 (2026-07-27) ---
@@ -175,15 +165,13 @@ def test_quick_responder_node_skips_culture_search_when_no_crop_or_theme():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge") as mock_search_culture, \
-         patch.object(nodes, "_fetch_market_insight", return_value=market_insight), \
-         patch.object(nodes, "get_chat_completion", return_value="구좌읍 방문객은...") as mock_llm:
+         patch.object(nodes, "_fetch_market_insight", return_value=market_insight):
         result = quick_responder_node(state)
 
     mock_search_culture.assert_not_called()
     assert result["culture_chunks"] == []
-    _, user_msg = mock_llm.call_args[0]
-    assert "문화·작물 지식 검색 결과" not in user_msg
-    assert "12,000명" in user_msg
+    assert "[제주 로컬 문화 및 작물 지식 가이드]" not in result["final_response"]
+    assert "12,000명" in result["final_response"]
 
 
 def test_quick_responder_node_runs_culture_search_when_only_concept_theme_present():
@@ -193,8 +181,7 @@ def test_quick_responder_node_runs_culture_search_when_only_concept_theme_presen
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_search_culture, \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
         quick_responder_node(state)
 
     mock_search_culture.assert_called_once()
@@ -237,30 +224,25 @@ def test_quick_responder_node_includes_market_location_resolution_note():
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=market_insight), \
-         patch.object(nodes, "get_chat_completion", return_value="구좌읍 통계...") as mock_llm:
-        quick_responder_node(_base_state(
+         patch.object(nodes, "_fetch_market_insight", return_value=market_insight):
+        result = quick_responder_node(_base_state(
             preferred_location="구좌읍", market_location_resolution=resolution
         ))
 
-    _, user_msg = mock_llm.call_args[0]
-    assert "구좌읍" in user_msg
-    assert "외국인" in user_msg
-    assert "1위 지역으로 자동 선정" in user_msg
+    assert "구좌읍" in result["final_response"]
+    assert "외국인 방문객" in result["final_response"]
+    assert "1위 지역으로 자동 선정" in result["final_response"]
 
 
 def test_quick_responder_node_passes_raw_none_month_to_market_insight_when_unspecified():
     """사용자 요청: "외도동 최근 방문객 수는?"처럼 질의에 월이 명시되지 않으면(b2b_params.
     target_month=None), quick_responder_node 는 "오늘 날짜의 달"로 대체한 값이 아니라 원본
-    그대로(None)를 _fetch_market_insight 에 넘겨야 합니다. target_month 를 오늘 날짜로 강제하면
-    DB 적재 범위가 이번 달까지가 아닐 때(2026-07-25 라이브 QA로 확인) 실제로는 최근 데이터가
-    있는데도 "통계를 찾지 못했다"는 오답과 불필요한 quality_checker 재시도 루프를 유발했습니다."""
+    그대로(None)를 _fetch_market_insight 에 넘겨야 합니다."""
     state = _base_state(preferred_location="외도동", target_month=None)
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market:
         quick_responder_node(state)
 
     assert mock_fetch_market.call_args[0][2] is None
@@ -269,8 +251,7 @@ def test_quick_responder_node_passes_raw_none_month_to_market_insight_when_unspe
 def test_quick_responder_node_skips_market_insight_when_disabled():
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market:
         quick_responder_node(_base_state(include_market_insights=False))
 
     mock_fetch_market.assert_not_called()
@@ -293,15 +274,13 @@ def test_quick_responder_node_scopes_search_by_target_course_when_crop_and_locat
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta) as mock_fetch_course, \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "표선면"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=culture_chunks) as mock_search_culture, \
-         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="1코스는 감귤로 유명합니다.") as mock_llm:
-        quick_responder_node(state)
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market:
+        result = quick_responder_node(state)
 
     assert mock_fetch_course.call_args[0][1] == "1코스"
     assert mock_search_culture.call_args[0][1] == "감귤"
     assert mock_fetch_market.call_args[0][1] == "성산읍"
-    _, user_msg = mock_llm.call_args[0]
-    assert "1코스" in user_msg
+    assert "1코스" in result["final_response"]
 
 
 # --- preferred_location 에 코스명이 들어오는 오염 방어 (2026-07-25 라이브 QA) ---
@@ -322,8 +301,7 @@ def test_quick_responder_node_replaces_course_name_location_with_real_region():
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="1코스는..."):
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market:
         result = quick_responder_node(state)
 
     # 통계 조회에도, 하류 노드가 읽는 state 에도 코스명이 아니라 실제 행정 지역이 쓰여야 합니다.
@@ -341,8 +319,7 @@ def test_quick_responder_node_writes_corrected_location_back_to_state():
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=None), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
         result = quick_responder_node(state)
 
     assert result["b2b_params"]["preferred_location"] is None
@@ -362,8 +339,7 @@ def test_quick_responder_node_clears_course_name_location_when_region_unresolvab
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍", "구좌읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="9코스는..."):
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market:
         result = quick_responder_node(state)
 
     assert mock_fetch_market.call_args[0][1] is None
@@ -382,8 +358,7 @@ def test_quick_responder_node_keeps_real_region_location_untouched():
                                     "administrative_areas": "시흥리"}), \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market, \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight", return_value=None) as mock_fetch_market:
         result = quick_responder_node(state)
 
     assert mock_fetch_market.call_args[0][1] == "구좌읍"
@@ -417,25 +392,18 @@ def test_quick_responder_node_puts_course_metrics_into_prompt():
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=_COURSE_7_META), \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"대천동"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km로...") as mock_llm:
-        quick_responder_node(state)
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
+        result = quick_responder_node(state)
 
-    system_prompt, user_msg = mock_llm.call_args[0]
-    assert "17.6km" in user_msg
-    assert "6.0시간" in user_msg or "6시간" in user_msg
-    assert "5~6시간" in user_msg
-    assert "난이도: 중" in user_msg
-    assert "제주올레 여행자센터" in user_msg
-    # 수치를 근거로 인용하라는 지시와, 다른 코스/지역을 대안 추천하지 말라는 지시가 있어야 합니다.
-    assert "근거로 인용" in system_prompt
-    assert "추천하지 마세요" in system_prompt
+    assert "17.6km" in result["final_response"]
+    assert "5～6시간" in result["final_response"] or "6.0시간" in result["final_response"]
+    assert "난이도 '중'" in result["final_response"] or "난이도: 중" in result["final_response"]
+    assert "제주올레 여행자센터" in result["final_response"]
 
 
 def test_quick_responder_node_answers_from_course_meta_without_culture_or_market():
     """회귀 방지: 문화지식/통계가 둘 다 비어 있으면 예전엔 무조건 "찾지 못했습니다" 사과문으로
-    끝났습니다. 코스 메타데이터만 있어도 코스 의견 질의에는 답할 수 있어야 합니다(라이브에서
-    이 코스들의 실제 지역은 해당 월 통계가 없어 market_insight 가 None 이었음)."""
+    끝났습니다. 코스 메타데이터만 있어도 코스 의견 질의에는 답할 수 있어야 합니다."""
     state = _base_state(preferred_location="7코스")
     state["query"] = "7코스 초보자한테 추천할 만해?"
     state["target_course"] = "7코스"
@@ -446,12 +414,10 @@ def test_quick_responder_node_answers_from_course_meta_without_culture_or_market
              db_service, "_get_olle_relevant_admin_dongs", return_value=set()
          ), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="7코스는 17.6km입니다.") as mock_llm:
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
         result = quick_responder_node(state)
 
-    mock_llm.assert_called_once()
-    assert result["final_response"] == "7코스는 17.6km입니다."
+    assert "총 거리: 17.6km" in result["final_response"]
     assert "찾지 못했습니다" not in result["final_response"]
 
 
@@ -500,15 +466,13 @@ def test_quick_responder_node_omits_missing_course_metric_fields():
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
          patch.object(db_service, "_get_olle_relevant_admin_dongs", return_value={"성산읍"}), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="답변") as mock_llm:
-        quick_responder_node(state)
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
+        result = quick_responder_node(state)
 
-    _, user_msg = mock_llm.call_args[0]
-    assert "15.1km" in user_msg
-    assert "예상 소요시간" not in user_msg
-    assert "난이도" not in user_msg
-    assert "시작점" not in user_msg
+    assert "15.1km" in result["final_response"]
+    assert "소요시간:" not in result["final_response"]
+    assert "난이도: " not in result["final_response"]
+    assert "시작점: " not in result["final_response"]
 
 
 def test_quick_responder_node_does_not_override_explicit_crop_with_target_course():
@@ -521,8 +485,74 @@ def test_quick_responder_node_does_not_override_explicit_crop_with_target_course
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_search_culture, \
-         patch.object(nodes, "_fetch_market_insight", return_value=None), \
-         patch.object(nodes, "get_chat_completion", return_value="답변"):
+         patch.object(nodes, "_fetch_market_insight", return_value=None):
         quick_responder_node(state)
 
     assert mock_search_culture.call_args[0][1] == "당근"
+
+
+def test_quick_responder_node_skips_market_insight_when_no_stats_keyword():
+    """질문에 통계 키워드가 전혀 포함되어 있지 않은 경우, include_market_insights가 True여도
+    _fetch_market_insight 및 _resolve_stats_region_from_areas 호출을 건너뛰고 
+    [관광 방문객 통계] 분석 파트를 결과물에서 제외하는지 확인합니다."""
+    state = _base_state()
+    state["query"] = "1코스 소요시간 알려줘"
+    state["target_course"] = "1코스"
+    course_meta = {"course_name": "1코스", "crops": "감귤", "administrative_areas": "시흥리,종달리"}
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta), \
+         patch.object(nodes, "_search_culture_knowledge", return_value=[]), \
+         patch.object(nodes, "_resolve_stats_region_from_areas") as mock_resolve_region, \
+         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market:
+        
+        result = quick_responder_node(state)
+
+    # 1. DB 매핑 및 통계 조회가 모두 스킵되어야 함
+    mock_resolve_region.assert_not_called()
+    mock_fetch_market.assert_not_called()
+    
+    # 2. 결과물에 통계 분석 파트가 없어야 함
+    assert "[방문객 빅데이터 및 트래픽 분석]" not in result["final_response"]
+    assert "[대상 코스 상세 스펙]" in result["final_response"]
+
+
+def test_quick_responder_node_pure_course_spec_query_fast_path():
+    """질문에 작물/농업/통계 관련 키워드가 없는 순수 코스 스펙(예: 소요시간) 질의인 경우,
+    오직 코스 메타 DB 조회 1회만 수행하고 RAG 검색, 지역 매핑, 통계 조회를 모두 스킵하는지 확인합니다."""
+    state = _base_state()
+    state["query"] = "1코스 소요시간 알려줘"
+    state["target_course"] = "1코스"
+    course_meta = {
+        "course_name": "1코스",
+        "crops": "감자",
+        "administrative_areas": "시흥리,종달리,오조리",
+        "total_distance_km": 15.0,
+        "estimated_time_text": "5시간",
+        "difficulty": "중",
+        "content": "시흥초등학교에서 출발해 광치기해변까지 이어지는 올레길의 첫 단추 코스"
+    }
+
+    with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
+         patch.object(nodes, "_fetch_course_meta_by_name", return_value=course_meta) as mock_fetch_course, \
+         patch.object(nodes, "_search_culture_knowledge") as mock_search_culture, \
+         patch.object(nodes, "_resolve_stats_region_from_areas") as mock_resolve_region, \
+         patch.object(nodes, "_fetch_market_insight") as mock_fetch_market:
+        
+        result = quick_responder_node(state)
+
+    # 1. 코스 메타 DB 조회는 정확히 1회만 수행됨
+    assert mock_fetch_course.call_count == 1
+
+    # 2. 문화지식 RAG 검색, 지역 변환, 통계 조회는 모두 생략됨
+    mock_search_culture.assert_not_called()
+    mock_resolve_region.assert_not_called()
+    mock_fetch_market.assert_not_called()
+    
+    # 3. 조립된 텍스트 결과에 스펙만 포함됨
+    assert "[대상 코스 상세 스펙]" in result["final_response"]
+    assert "[방문객 빅데이터 및 트래픽 분석]" not in result["final_response"]
+    assert "[제주 로컬 문화 및 작물 지식 가이드]" not in result["final_response"]
+    assert "[안전 탐방 및 준비물 관리 수칙]" not in result["final_response"]
+
+

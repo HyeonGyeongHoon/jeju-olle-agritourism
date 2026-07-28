@@ -463,7 +463,7 @@ def test_tool_agent_preserves_existing_answer_when_nothing_new_to_look_up():
         res = tool_agent_node(state)
 
     mock_llm.assert_not_called()
-    assert res == {"tool_calls": None}
+    assert res == {"tool_calls": None, "skip_quality_check": True}
 
 
 def test_tool_agent_still_regenerates_when_previous_answer_had_no_grounding():
@@ -513,7 +513,7 @@ def test_tool_agent_does_not_requeue_tool_call_when_already_grounded_with_prefer
         res = tool_agent_node(state)
 
     mock_llm.assert_not_called()
-    assert res == {"tool_calls": None}
+    assert res == {"tool_calls": None, "skip_quality_check": True}
 
 
 def test_tool_agent_queues_tool_call_using_target_month_when_market_query_has_no_month():

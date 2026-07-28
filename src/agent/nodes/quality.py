@@ -83,6 +83,7 @@ def check_quality_node(state: AgentState) -> Dict[str, Any]:
     가 상태에 남아있으면 아래 "코스 청크는 없지만 culture/market 은 있는" 분기를 타서 반려
     메시지를 무관한 통계 컨텍스트와 대조하다 최대 3회의 재작성 루프를 도는 낭비가 생깁니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _build_culture_context_str,
         _build_market_insight_summary_str,
@@ -221,6 +222,7 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON 문자열로만 
 
 def rewrite_query_node(state: AgentState) -> Dict[str, Any]:
     """검증 실패 시, 더 정밀한 검색 컨텍스트 획득을 위해 검색 조건 및 키워드를 교정하는 Query Re-writer 노드입니다."""
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         get_chat_completion,
     )

@@ -24,6 +24,7 @@ def evaluate_safety_node(state: AgentState) -> Dict[str, Any]:
     기상 API(KMA 등)는 호출하지 않고, 문서화된 계절 지식(get_seasonal_climate_note)과 Solar
     LLM(assess_weather_risk_from_query) 만 사용합니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         assess_weather_risk_from_query,
         get_seasonal_climate_note,

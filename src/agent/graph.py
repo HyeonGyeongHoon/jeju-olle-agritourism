@@ -1,5 +1,6 @@
 from langgraph.graph import END, StateGraph
 
+# pyrefly: ignore [missing-import]
 from src.agent.nodes import (
     check_quality_node,
     classify_intent_node,
@@ -13,8 +14,43 @@ from src.agent.nodes import (
     tool_agent_node,
     tool_executor_node,
 )
+# pyrefly: ignore [missing-import]
 from src.agent.state import AgentState
+# pyrefly: ignore [missing-import]
 from src.models.schema import IntentCategory
+
+
+def route_after_intent_classify(state: AgentState) -> str:
+    """intent_classifier 이후, 의도 분류가 other 인 경우 B2B 상품 기획이나 올레 코스 RAG 의
+    범위를 완전히 벗어나므로 키워드 분석(intent_parser)을 타지 않고 바로 quick_responder 로
+    직행시킵니다. 그 외 의도는 정상적으로 키워드 분석으로 라우팅합니다."""
+    if state.get("intent_category") == IntentCategory.OTHER.value:
+        return "quick_response"
+    return "parse_intent"
+
+
+def route_after_quick_response(state: AgentState) -> str:
+    """quick_responder 이후, skip_quality_check 가 True 로 설정되어 있으면
+    더 이상의 추가 도구 호출이나 품질 검증 루프가 불필요하므로 즉시 END 로 종료합니다.
+    그렇지 않은 경우에만 tool_agent 로 라우팅하여 도구 호출 결정을 위임합니다."""
+    if state.get("skip_quality_check"):
+        return "end"
+    return "tool_agent"
+
+
+def route_after_intent_parse(state: AgentState) -> str:
+    """질문 분석 결과(intent_parser)를 보고, 통계 기반 지역 역검색 조건이 존재하면
+    market_location_resolver 로 보내고, 조건이 없으면 해당 노드를 완전히 건너뛰어
+    의도에 따라 quick_responder 또는 safety_evaluator 로 직행시킵니다."""
+    b2b_params = state.get("b2b_params") or {}
+    query_spec = b2b_params.get("market_location_query")
+    # 통계 역검색 조건이 존재하고, 직접 명시한 preferred_location 이 없는 경우에만 resolver 실행
+    if query_spec and query_spec.get("metric") and not b2b_params.get("preferred_location"):
+        return "resolve_location"
+        
+    if state.get("intent_category") == IntentCategory.COURSE_RECOMMENDATION.value:
+        return "full_pipeline"
+    return "quick_response"
 
 
 def route_after_location_resolve(state: AgentState) -> str:
@@ -41,9 +77,13 @@ def route_after_retriever(state: AgentState) -> str:
 
 def should_call_tools(state: AgentState) -> str:
     """tool_agent_node 가 실행을 요청한 tool_calls 가 있으면 tool_executor 로,
-    최종 대화 답변 작성이 완료되었으면 quality_checker 로 라우팅합니다."""
+    quick_responder 가 이미 DB 근거 기반 답변을 만들어 tool_agent 가 조기 종료한 경우
+    (skip_quality_check=True)에는 quality_checker 를 건너뛰고 바로 종료합니다.
+    그 외 최종 대화 답변 작성이 완료되었으면 quality_checker 로 라우팅합니다."""
     if state.get("tool_calls"):
         return "call_tools"
+    if state.get("skip_quality_check"):
+        return "end"
     return "quality_check"
 
 
@@ -109,11 +149,41 @@ def build_agent_graph():
 
     # 2. 고정 경로 엣지 연결
     workflow.set_entry_point("intent_classifier")
-    workflow.add_edge("intent_classifier", "intent_parser")
-    workflow.add_edge("intent_parser", "market_location_resolver")
+    
+    # 의도 분석 분류 결과에 따라 키워드 분석(intent_parser)을 탈지 바로 quick_responder 로 우회할지 분기
+    workflow.add_conditional_edges(
+        "intent_classifier",
+        route_after_intent_classify,
+        {
+            "quick_response": "quick_responder",
+            "parse_intent": "intent_parser"
+        }
+    )
+    
+    # intent_parser 의 분석 결과(키워드)에 따라 resolver 실행 여부 분기
+    workflow.add_conditional_edges(
+        "intent_parser",
+        route_after_intent_parse,
+        {
+            "resolve_location": "market_location_resolver",
+            "full_pipeline": "safety_evaluator",
+            "quick_response": "quick_responder"
+        }
+    )
+    
     workflow.add_edge("safety_evaluator", "retriever")
     workflow.add_edge("report_generator", "quality_checker")
-    workflow.add_edge("quick_responder", "tool_agent")
+    
+    # quick_responder 의 조기 완료 여부에 따라 바로 종료할지 tool_agent 로 보낼지 분기
+    workflow.add_conditional_edges(
+        "quick_responder",
+        route_after_quick_response,
+        {
+            "end": END,
+            "tool_agent": "tool_agent"
+        }
+    )
+    
     workflow.add_edge("tool_executor", "tool_agent")
 
     # 2-1. course_recommendation 의도만 full pipeline, 나머지는 quick_responder 로 우회
@@ -146,7 +216,8 @@ def build_agent_graph():
         should_call_tools,
         {
             "call_tools": "tool_executor",
-            "quality_check": "quality_checker"
+            "quality_check": "quality_checker",
+            "end": END,
         }
     )
 

@@ -30,6 +30,7 @@ def classify_intent_node(state: AgentState) -> Dict[str, Any]:
     route_intent 로 새로 분류합니다 — 잘못된 문자열이 하류의 문자열 비교 분기들을 예측 불가능하게
     만드는 것을 막기 위함입니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         route_intent,
     )
@@ -61,6 +62,7 @@ def parse_intent_node(state: AgentState) -> Dict[str, Any]:
     핵심 파라미터(방문 시기, 매개 작물/테마, 선호 지역, 컨셉)를 추출하여 정형화하는
     Intent Parser 노드입니다.
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         get_chat_completion,
     )
@@ -125,6 +127,7 @@ def resolve_market_location_node(state: AgentState) -> Dict[str, Any]:
     선정 자체를 fail-closed 로 건너뜁니다 — 후보를 모르면 무제한 검색으로 느슨하게 폴백하지
     않습니다(과거에는 그렇게 했었는데, 이는 위 도메인 규칙을 그대로 어길 수 있는 경로였음).
     """
+    # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
         _MARKET_METRIC_LABELS,
         _get_latest_available_year_month,

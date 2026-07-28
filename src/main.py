@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+# pyrefly: ignore [missing-import]
 from src.agent.graph import agent_runtime
 
 app = FastAPI(
@@ -179,11 +180,14 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
 
     try:
         final_response_text = None
+        current_state = dict(inputs)
 
         while True:
             event = await queue.get()
             if event is None:
                 break
+            if not event or not isinstance(event, dict):
+                continue
             if "__error__" in event:
                 raise RuntimeError(event["__error__"])
 
@@ -192,8 +196,29 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
             # 넘겨줍니다(예: market_location_resolver 가 통계 기반 지역 조건이 없어 아무 것도 안 할
             # 때). node_output.get(...) 호출 전에 None 을 빈 dict 로 방어해야 합니다.
             node_output = event[node_name] or {}
+            
+            # 진행 상태 누적 업데이트
+            current_state.update(node_output)
 
             label = NODE_PROGRESS_LABELS.get(node_name, node_name)
+            if node_name == "quick_responder":
+                intent = current_state.get("intent_category")
+                query_text = current_state.get("query") or ""
+                
+                # 1. 범위 밖 질문 (other)
+                if intent == "other":
+                    label = "📖 서비스 범위 확인 및 사외 안내문 작성 중..."
+                # 2. 단순 코스 명세 질의 (작물/통계 키워드가 없는 경우)
+                elif not any(kw in query_text for kw in [
+                    "통계", "방문객", "인구", "사람", "수치", "방문", "수", "인원", "트래픽",
+                    "작물", "감귤", "감자", "당근", "마늘", "양파", "무", "파", "배추", "보리", "밭담",
+                    "농가", "상생", "영농", "수확", "재배", "파종", "체험", "제철", "로컬", "농업"
+                ]):
+                    label = "📖 코스 상세 스펙 조회 중..."
+                # 3. 그 외 기본값 (문화/작물/관광 RAG 정보 조회)
+                else:
+                    label = "📖 문화·작물·관광 정보 조회 중..."
+
             progress = {"node": node_name, "label": label}
             yield f"event: node_progress\ndata: {json.dumps(progress, ensure_ascii=False)}\n\n"
 
@@ -209,7 +234,7 @@ async def report_event_generator(query: str, cancel_event: Optional[threading.Ev
         # 상세 예외 내용(내부 DB/API 에러 문구, 스택 등)은 서버 로그에만 남기고, 인증 없이도
         # 호출 가능한 이 엔드포인트를 통해 클라이언트에게는 일반화된 메시지만 노출합니다 —
         # 내부 구현 세부사항이 그대로 새어나가는 정보 노출을 막기 위함입니다.
-        print(f"[!] report_event_generator 처리 중 오류 발생: {e}")
+        print(f"[!] report_event_generator 처리 중 오류 발생: {repr(e)}")
         error_msg = "요청을 처리하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
         yield f"event: error\ndata: {json.dumps({'message': error_msg}, ensure_ascii=False)}\n\n"
     finally:

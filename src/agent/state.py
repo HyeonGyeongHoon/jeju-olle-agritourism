@@ -574,3 +574,8 @@ class AgentState(TypedDict):
     tool_calls: Optional[List[ToolCallDict]]
     tool_outputs: Optional[List[ToolOutputDict]]
     tool_depth: Optional[int]
+    # quick_responder_node 가 이미 근거 있는 답변을 만들고 tool_agent_node 가 조기 종료한 경우,
+    # Self-RAG quality_checker LLM 호출 자체를 건너뛰기 위한 신호 플래그입니다.
+    # True 이면 should_call_tools 가 quality_check 대신 END 로 바로 라우팅합니다.
+    # info_lookup 단순 코스 스펙 질의에서 불필요한 LLM 검증 비용과 UX 지연을 제거합니다.
+    skip_quality_check: bool
