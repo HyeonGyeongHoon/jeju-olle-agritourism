@@ -82,11 +82,11 @@ def test_generate_report_node_produces_all_five_sections_in_one_call():
         }
     ]
 
-    with patch.object(nodes, "get_chat_completion", side_effect=[docent_llm_answer, "| 푸드/음료 | ... | ... | ... |"]) as mock_llm, \
+    with patch.object(nodes, "get_chat_completion", side_effect=[docent_llm_answer, "| 푸드/음료 | ... | ... | ... |", "## 5. 🎒 로컬 안전 탐방 가이드 및 준비물"]) as mock_llm, \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=mock_recommendations):
         result = generate_report_node(_base_state())
 
-    assert mock_llm.call_count == 2  # 섹션 1·2용 1회 + 섹션 3 아이디어용 1회
+    assert mock_llm.call_count == 3  # 섹션 1·2용 1회 + 섹션 3 아이디어용 1회 + 안전 가이드용 1회
     report = result["final_response"]
     for header in ("## 1.", "## 2.", "## 3.", "## 4.", "## 5."):
         assert header in report, f"{header} 섹션이 통합 리포트에 없습니다."
@@ -108,7 +108,7 @@ def test_generate_report_node_plan_b_does_not_tangle_a_complete_guideline_senten
         }
     )
 
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]), \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         result = generate_report_node(state)
 
@@ -130,7 +130,7 @@ def test_generate_report_node_plan_b_uses_correct_particle_for_noun_phrase_overr
         }
     )
 
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]), \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         result = generate_report_node(state)
 
@@ -144,7 +144,7 @@ def test_generate_report_node_plan_b_default_route_phrase_unchanged():
     경우의 기존 동작(받침 있는 명사 "동선" + "으로")은 그대로 유지되어야 합니다."""
     state = _base_state(safety_check={"reroute_required": True, "safety_status": "WARNING"})
 
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]), \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         result = generate_report_node(state)
 
@@ -158,7 +158,7 @@ def test_generate_report_node_prompt_never_leaks_raw_fallback_booleans():
     (현재 fail-fast 정책 하의 실제 값)인 정상 경로에서 시스템 프롬프트 자체에 "True"/"False"
     리터럴이나 "적용 여부는" 같은 사실-서술형 문구가 전혀 없어야 합니다 — 대신 완결된
     지시문(각주를 추가하지 말라는 지시)만 있어야 합니다."""
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]) as mock_llm, \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]) as mock_llm, \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         generate_report_node(_base_state())
 
@@ -172,7 +172,7 @@ def test_generate_report_node_prompt_instructs_exact_footnote_when_fallback_appl
     """fallback_applied=True + fallback_reason 이 있는(비현실적이지만 방어적으로 남겨둔)
     경로에서는, 프롬프트가 True/False 리터럴이 아니라 실제 각주 문장을 그대로 지시해야
     합니다."""
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]) as mock_llm, \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]) as mock_llm, \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         generate_report_node(_base_state(fallback_applied=True, fallback_reason="테스트 완화 사유"))
 
@@ -183,13 +183,13 @@ def test_generate_report_node_prompt_instructs_exact_footnote_when_fallback_appl
 
 
 def test_generate_report_node_skips_section_3_ideas_when_no_local_recommendations():
-    with patch.object(nodes, "get_chat_completion", return_value="## 1. ...\n## 2. ...") as mock_llm, \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "## 5. ..."]) as mock_llm, \
          patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         result = generate_report_node(_base_state())
 
-    mock_llm.assert_called_once()  # 소개 참고자료가 없으면 아이디어 LLM 호출 자체를 생략
+    assert mock_llm.call_count == 2  # 소개 참고자료가 없으면 아이디어 LLM 생략, 대신 안전 가이드 1회 포함 총 2회 호출
     assert "아이디어 제안을 생략합니다" in result["final_response"]
-    assert "## 5. 🛡️ Trust Tagging" in result["final_response"]
+    assert "## 6. 🛡️ Trust Tagging" in result["final_response"]
 
 
 def test_generate_report_node_calls_visit_jeju_api_concurrently_not_sequentially():
@@ -217,7 +217,7 @@ def test_generate_report_node_calls_visit_jeju_api_concurrently_not_sequentially
 
     with patch.object(
         nodes, "get_chat_completion",
-        side_effect=["## 1. ...\n## 2. ...", "| 푸드/음료 | ... | ... | ... |"],
+        side_effect=["## 1. ...\n## 2. ...", "| 푸드/음료 | ... | ... | ... |", "## 5. ..."],
     ), patch.object(nodes, "get_visit_jeju_recommendations", side_effect=slow_recommendation):
         start = time.monotonic()
         result = generate_report_node(state)
@@ -246,7 +246,7 @@ def test_generate_report_node_prices_only_top_course_combos_not_other_chunks():
 
     with patch.object(
         nodes, "get_chat_completion",
-        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"],
+        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."],
     ) as mock_llm, patch.object(
         nodes, "get_visit_jeju_recommendations",
         return_value=[{"crop_tag": "x", "title": "t", "introduction": "i", "source": "mock_db"}],
@@ -319,7 +319,7 @@ def test_generate_report_node_injects_computed_price_and_breakdown_into_prompt()
     expected_breakdown = _build_price_breakdown_str(price_course, "family", num_local_combos=1)
 
     with patch.object(
-        nodes, "get_chat_completion", side_effect=[docent_llm_answer, "| 표 | ... | ... | ... |"]
+        nodes, "get_chat_completion", side_effect=[docent_llm_answer, "| 표 | ... | ... | ... |", "## 5. ..."]
     ) as mock_llm, patch.object(
         nodes,
         "get_visit_jeju_recommendations",
@@ -353,7 +353,7 @@ def test_generate_report_node_pins_crop_attribution_to_top_matched_course_only()
     )
 
     with patch.object(
-        nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]
+        nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]
     ) as mock_llm, patch.object(nodes, "get_visit_jeju_recommendations", return_value=[]):
         generate_report_node(state)
 
@@ -399,7 +399,7 @@ def test_generate_report_node_excludes_co_grown_crops_when_strict_single_crop():
 
     with patch.object(
         nodes, "get_chat_completion",
-        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"],
+        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."],
     ) as mock_llm, patch.object(
         nodes, "get_visit_jeju_recommendations", side_effect=recording_recommendation,
     ):
@@ -444,7 +444,7 @@ def test_generate_report_node_keeps_all_co_grown_crops_when_not_strict_single_cr
 
     with patch.object(
         nodes, "get_chat_completion",
-        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"],
+        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."],
     ) as mock_llm, patch.object(
         nodes, "get_visit_jeju_recommendations", side_effect=recording_recommendation,
     ):
@@ -475,7 +475,7 @@ def test_generate_report_node_does_not_apply_strict_single_crop_when_crop_not_in
 
     with patch.object(
         nodes, "get_chat_completion",
-        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"],
+        side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."],
     ), patch.object(
         nodes, "get_visit_jeju_recommendations",
         return_value=[{"crop_tag": "x", "title": "t", "introduction": "i", "source": "mock_db"}],
@@ -504,7 +504,7 @@ def test_generate_report_node_deduplicates_visit_jeju_calls_across_chunks():
          "difficulty": "하", "crops": "감귤", "administrative_areas": "종달리", "content": "..."},
     ])
 
-    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |"]), \
+    with patch.object(nodes, "get_chat_completion", side_effect=["## 1. ...\n## 2. ...", "| 표 | ... | ... | ... |", "## 5. ..."]), \
          patch.object(nodes, "get_visit_jeju_recommendations", side_effect=counting_recommendation):
         result = generate_report_node(state)
 

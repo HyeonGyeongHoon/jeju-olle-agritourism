@@ -179,6 +179,12 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         key_crop = b2b_params.get("key_item_or_crop")
         market_query = b2b_params.get("market_location_query") or {}
 
+        has_grounded_answer = bool(
+            state.get("course_meta") or state.get("culture_chunks") or state.get("market_insight")
+        )
+        if not is_retry_pass and has_grounded_answer and state.get("final_response"):
+            return {"tool_calls": None}
+
         pending_tool_calls = []
         if market_query.get("metric") or preferred_loc:
             loc = preferred_loc or "성산읍"
@@ -212,7 +218,9 @@ def tool_agent_node(state: AgentState) -> Dict[str, Any]:
         # 도구를 큐잉하기 전에 먼저 확인합니다: quick_responder_node 가 이미 이 질의의 근거를
         # 확보해 답변을 만들어뒀거나, 호출할 도구(pending_tool_calls)가 전혀 없고 기존 답변(final_response)이
         # 존재한다면 굳이 텅 빈 컨텍스트로 LLM 을 다시 불러 답변을 재생성(환각 오염 우려)하지 않고 그대로 종료합니다.
-        if not is_retry_pass and not pending_tool_calls and state.get("final_response"):
+        # (단, RAG/DB 조회 실패로 인한 거절 답변인 "찾지 못했습니다" 문구가 포함된 경우는 일반 지식 답변으로 재생성하도록 가드를 우회합니다.)
+        is_declined = "찾지 못했습니다" in (state.get("final_response") or "")
+        if not is_retry_pass and not pending_tool_calls and state.get("final_response") and not is_declined:
             return {"tool_calls": None}
 
         if pending_tool_calls:

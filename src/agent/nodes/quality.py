@@ -265,5 +265,7 @@ JSON 마크다운 코드 펜스(```json ...) 없이 순수 JSON로만 반환하�
         
     return {
         "parsed_constraints": updated_constraints,
-        "loop_count": state["loop_count"] + 1
+        "loop_count": state["loop_count"] + 1,
+        "is_exit_early": False,
+        "exit_reason": None
     }

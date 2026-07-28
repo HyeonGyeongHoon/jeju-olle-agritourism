@@ -90,7 +90,7 @@
 
 | 검증 단계 | 대상 파일 | 검증 항목 | 결과 |
 |---|---|---|---|
-| 단위 테스트 및 시나리오 검증 | [test_agent_graph.py](../../tests/agent/test_agent_graph.py) | - DANGER 기상 시 fail-fast 반려 동작 검증<br>- 일반 수칙 질문 시 여름 작물 정보 오염 발생 차단 검증<br>- B2B 기획서 내 준비물 섹션 신설 및 출처 순연 레이아웃 검증 | **Success** (3 passed) |
+| 단위 테스트 및 시나리오 검증 | [test_agent_graph.py](../../tests/agent/test_agent_graph.py) | - DANGER 기상 시 fail-fast 반려 동작 검증<br>- 일반 수칙 질문 시 여름 작물 정보 오염 발생 차단 검증<br>- B2B 기획서 내 준비물 섹션 신설 및 출처 순연 레이아웃 검증 | **Success** (326 passed / 전체 테스트 스위트 검증 완료) |
 | 수동 톤 앤 매너 검증 | [quick_responder.md](../../src/agent/prompts/quick_responder.md) | B2B 기획자 지침에 맞는 개조식 문체 반영 여부 검증 | **Success** (개조식 톤 유지 및 일반 여행객 어조 제거 완료) |
 | 날씨 파싱 검증 | [weather_client.py](../../src/agent/weather_client.py) | 비정형 부가 설명이 섞인 JSON 응답의 정규식 안정 파싱 검증 | **Success** (안정적 디코딩 가드 성공) |
 | LangSmith 오프라인 평가 검증 | [evaluate_agent.py](../../scripts/evaluate_agent.py) | 데이터셋 생성 및 배치 평가 실행 후 LangSmith 실험 링크 생성 검증 | **Success** (실험 결과 링크 로깅 완료) |

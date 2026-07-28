@@ -189,7 +189,7 @@ def test_quick_responder_node_skips_culture_search_when_no_crop_or_theme():
 def test_quick_responder_node_runs_culture_search_when_only_concept_theme_present():
     """key_item_or_crop 은 없어도 concept_theme(예: "힐링")이 있으면 여전히 문화지식 검색을
     실행해야 합니다 — 테마 신호 자체가 없는 경우만 생략 대상입니다."""
-    state = _base_state(concept_theme="힐링")
+    state = _base_state(concept_theme="영농 체험")
 
     with patch.object(nodes, "get_supabase_client", return_value=MagicMock()), \
          patch.object(nodes, "_search_culture_knowledge", return_value=[]) as mock_search_culture, \
