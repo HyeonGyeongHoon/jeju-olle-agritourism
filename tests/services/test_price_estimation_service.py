@@ -16,6 +16,7 @@ from src.services.price_estimation_service import (
     _PRICE_BASE_RATE_PER_HOUR,
     _PRICE_DIFFICULTY_MULTIPLIER,
     _PRICE_GROUP_SIZE_BY_AUDIENCE,
+    _PRICE_GUIDE_DAILY,
     _build_price_breakdown_str,
     _compute_price_breakdown,
     _estimate_price_range,
@@ -29,10 +30,9 @@ def _course(hours=4.0, difficulty="중"):
 
 def _expected_per_person(hours, difficulty, audience, num_combos):
     """테스트 쪽에서 산식을 독립적으로 재구현해 구현과 교차 검증합니다."""
-    mult = _PRICE_DIFFICULTY_MULTIPLIER[difficulty]
     group_size = _PRICE_GROUP_SIZE_BY_AUDIENCE[audience]
     combos_used = min(num_combos, _PRICE_ADDON_MAX_COMBOS)
-    group_cost = _PRICE_BASE_FLAT + hours * _PRICE_BASE_RATE_PER_HOUR * mult
+    group_cost = _PRICE_BASE_FLAT + _PRICE_GUIDE_DAILY
     return group_cost / group_size + combos_used * _PRICE_ADDON_PER_COMBO
 
 
@@ -78,21 +78,21 @@ def test_compute_price_breakdown_falls_back_to_family_size_for_unknown_audience(
 
 
 def test_compute_price_breakdown_applies_difficulty_multiplier():
-    """난이도 상/중/하 배수가 해설비에 그대로 곱해져야 합니다."""
+    """난이도 정보가 전달되어야 하지만 가이드 해설비는 고정 금액이어야 합니다."""
     for difficulty, mult in _PRICE_DIFFICULTY_MULTIPLIER.items():
         course = _course(difficulty=difficulty)
         b = _compute_price_breakdown(course, "family", num_local_combos=0)
         assert b["difficulty"] == difficulty
         assert b["difficulty_mult"] == mult
-        assert b["guide_cost"] == 4.0 * _PRICE_BASE_RATE_PER_HOUR * mult
+        assert b["guide_cost"] == _PRICE_GUIDE_DAILY
 
 
-def test_compute_price_breakdown_difficulty_order_is_monotonic():
-    """난이도가 높을수록 1인 단가가 높아야 합니다(하 < 중 < 상)."""
+def test_compute_price_breakdown_difficulty_does_not_affect_price():
+    """난이도가 달라도 가이드 비용이 고정되므로 1인 단가는 동일해야 합니다."""
     low = _compute_price_breakdown(_course(difficulty="하"), "family", 0)
     mid = _compute_price_breakdown(_course(difficulty="중"), "family", 0)
     high = _compute_price_breakdown(_course(difficulty="상"), "family", 0)
-    assert low["per_person"] < mid["per_person"] < high["per_person"]
+    assert low["per_person"] == mid["per_person"] == high["per_person"]
 
 
 def test_compute_price_breakdown_falls_back_to_medium_difficulty_when_unknown():
@@ -110,17 +110,11 @@ def test_compute_price_breakdown_falls_back_to_medium_difficulty_when_unknown():
 
 
 def test_compute_price_breakdown_uses_one_hour_floor_when_hours_missing_or_zero():
-    """회귀 방지: estimated_time_hours 는 나중에 chunks_data 에 추가된 컬럼이라
-    결측/0 일 수 있는데, 예전엔 이 값으로 바로 곱셈을 하면 해설비가 0원이 되거나
-    None 곱셈으로 터질 수 있었습니다. 계산을 포기하지 않고 1시간으로 간주해
-    최소 해설비가 반영되어야 합니다(fail-soft).
-    """
-    mult = _PRICE_DIFFICULTY_MULTIPLIER["중"]
-    expected_guide = 1.0 * _PRICE_BASE_RATE_PER_HOUR * mult
+    """시간 정보가 누락되어도 hours는 1.0으로 보정되지만 가이드비는 여전히 고정입니다."""
     for hours in (0, 0.0, None):
         b = _compute_price_breakdown(_course(hours=hours), "family", 0)
         assert b["hours"] == 1.0
-        assert b["guide_cost"] == expected_guide
+        assert b["guide_cost"] == _PRICE_GUIDE_DAILY
 
 
 def test_compute_price_breakdown_uses_one_hour_floor_when_hours_key_absent():

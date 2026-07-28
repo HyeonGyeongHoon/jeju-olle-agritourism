@@ -36,7 +36,8 @@ from typing import Any, Dict, List
 _PRICE_BASE_FLAT = 10_000
 _PRICE_BASE_RATE_PER_HOUR = 15_000
 _PRICE_DIFFICULTY_MULTIPLIER = {"하": 1.0, "중": 1.15, "상": 1.3}
-_PRICE_ADDON_PER_COMBO = 3_000
+_PRICE_GUIDE_DAILY = 150_000
+_PRICE_ADDON_PER_COMBO = 5_000
 _PRICE_ADDON_MAX_COMBOS = 3
 _PRICE_GROUP_SIZE_BY_AUDIENCE = {
     "family": 4,
@@ -68,7 +69,7 @@ def _compute_price_breakdown(
     group_size = _PRICE_GROUP_SIZE_BY_AUDIENCE.get(target_audience, _PRICE_GROUP_SIZE_BY_AUDIENCE["family"])
     combos_used = min(num_local_combos, _PRICE_ADDON_MAX_COMBOS)
 
-    guide_cost = hours * _PRICE_BASE_RATE_PER_HOUR * difficulty_mult
+    guide_cost = _PRICE_GUIDE_DAILY
     group_cost = _PRICE_BASE_FLAT + guide_cost
     per_person_group_cost = group_cost / group_size
     addon_total = combos_used * _PRICE_ADDON_PER_COMBO
@@ -86,8 +87,10 @@ def _compute_price_breakdown(
         "per_person_group_cost": per_person_group_cost,
         "addon_total": addon_total,
         "per_person": per_person,
-        "low": round(per_person * 0.9 / 1_000) * 1_000,
-        "high": round(per_person * 1.15 / 1_000) * 1_000,
+        # +1e-9: 0.9/1.15 곱셈이 부동소수점 오차로 x.5 바로 아래(예: 57.499999999999999)에
+        # 떨어져 정수 원 단위 경계에서 한 단계 아래로 잘못 반올림되는 것을 막기 위한 보정.
+        "low": round(per_person * 0.9 / 1_000 + 1e-9) * 1_000,
+        "high": round(per_person * 1.15 / 1_000 + 1e-9) * 1_000,
     }
 
 
@@ -109,8 +112,7 @@ def _build_price_breakdown_str(course: Dict[str, Any], target_audience: str, num
     b = _compute_price_breakdown(course, target_audience, num_local_combos)
     audience_label = _PRICE_AUDIENCE_LABEL.get(target_audience, "가족")
     lines = [
-        f"  - 도슨트 해설비: {b['hours']:g}시간 × {_PRICE_BASE_RATE_PER_HOUR:,}원 × "
-        f"난이도 배수({b['difficulty']}) {b['difficulty_mult']:g} = {round(b['guide_cost']):,}원",
+        f"  - 도슨트 해설비: 하루 기준 고정 비용 = {round(b['guide_cost']):,}원",
         f"  - 그룹 고정비: {_PRICE_BASE_FLAT:,}원 → 그룹 비용 합계 {round(b['group_cost']):,}원 "
         f"({audience_label} 단위 {b['group_size']}인 기준)",
         f"  - 1인 분담액: {round(b['group_cost']):,}원 ÷ {b['group_size']}인 = "

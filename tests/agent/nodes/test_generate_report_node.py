@@ -258,12 +258,12 @@ def test_generate_report_node_prices_only_top_course_combos_not_other_chunks():
 
 
 def test_estimate_price_range_uses_group_size_and_difficulty_and_addons():
-    """가족(4인) 타겟, 5.5시간, 난이도 중, 로컬 제휴 조합 2건 기준 예상 범위를 검증합니다.
-    group_cost = 10,000 + 5.5*15,000*1.15 = 104,875, addon = 2*3,000 = 6,000
-    per_person = 104,875/4 + 6,000 = 32,218.75 -> low=29,000, high=37,000 (1,000원 반올림)."""
+    """가족(4인) 타겟, 하루 고정 가이드비, 로컬 제휴 조합 2건 기준 예상 범위를 검증합니다.
+    group_cost = 10,000 + 150,000 = 160,000, addon = 2 * 5,000 = 10,000
+    per_person = 160,000/4 + 10,000 = 50,000 -> low=45,000, high=58,000 (1,000원 반올림)."""
     course = {"estimated_time_hours": 5.5, "difficulty": "중"}
     result = _estimate_price_range(course, "family", num_local_combos=2)
-    assert result == "29,000원 ~ 37,000원"
+    assert result == "45,000원 ~ 58,000원"
 
 
 def test_estimate_price_range_varies_by_target_audience_group_size():
@@ -300,11 +300,11 @@ def test_build_price_breakdown_str_shows_each_calculation_step_readably():
 
     assert len(lines) == 5
     assert all(line.startswith("  -") for line in lines)
-    assert "도슨트 해설비" in lines[0] and "94,875원" in lines[0]
-    assert "그룹 고정비" in lines[1] and "104,875원" in lines[1] and "4인" in lines[1]
-    assert "1인 분담액" in lines[2] and "26,219원" in lines[2]
-    assert "로컬 체험 연계 2건" in lines[3] and "6,000원" in lines[3]
-    assert "32,219원" in lines[4] and "29,000원 ~ 37,000원" in lines[4]
+    assert "도슨트 해설비" in lines[0] and "150,000원" in lines[0]
+    assert "그룹 고정비" in lines[1] and "160,000원" in lines[1] and "4인" in lines[1]
+    assert "1인 분담액" in lines[2] and "40,000원" in lines[2]
+    assert "로컬 체험 연계 2건" in lines[3] and "10,000원" in lines[3]
+    assert "50,000원" in lines[4] and "45,000원 ~ 58,000원" in lines[4]
 
 
 def test_generate_report_node_injects_computed_price_and_breakdown_into_prompt():
