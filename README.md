@@ -11,7 +11,8 @@
 2. 📍 **구간별 타임라인 표** — 실제 코스 세부구간(km) 데이터 기반 도슨트 포인트 + 현장 체크리스트
 3. ☕ **로컬 상생 제휴 아이디어 표** — 매장명 노출 없이, 지역 상점 성격에서 착안한 협업 컨셉 제안
 4. 🌤️ **기후 리스크 및 Plan A/B 우회 동선**
-5. 🛡️ **Trust Tagging** — 데이터 출처 및 신뢰도 표기
+5. 🎒 **로컬 안전 탐방 가이드 및 준비물** — 방문 월·기상 리스크(SAFE/WARNING) 기반 안전 수칙·준비물·에티켓 실무 지침
+6. 🛡️ **Trust Tagging** — 데이터 출처 및 신뢰도 표기
 
 ## 2. 핵심 특징
 - **LangGraph 9노드 자율 순환 에이전트**: 의도 분류 → 안전 평가 → 하이브리드 검색 → 리포트 합성 → 로컬 아이디어 생성 → Self-RAG 품질 검증(실패 시 최대 3회 자동 재작성) / 단순 질의는 quick_responder → tool_agent 경량 경로로 처리
@@ -46,7 +47,7 @@
 | 노드 | 역할 |
 |---|---|
 | `intent_analyzer` | 의도 분류(course_recommendation / info_lookup / other) + 제약조건 파싱 + 지역 자동 추론 |
-| `safety_evaluator` | 월별 정적 기후 테이블 기반 계절 리스크 평가 |
+| `safety_evaluator` | 월별 정적 기후 테이블 + LLM 문맥 판단으로 계절 리스크 평가. DANGER 등급 시 Fail-Fast 반려 |
 | `retriever` | 코스·문화지식 하이브리드 검색, DB 매칭 0건 시 Fail-Fast 반려 |
 | `report_generator` | 5단 B2B 기획서 합성 |
 | `quality_checker` | Self-RAG 신뢰도 검증 (★ 기반 Pass/Fail) |
