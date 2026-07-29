@@ -1,0 +1,68 @@
+{
+	"info": {
+		"_postman_id": "adee1a68-cd44-427d-8150-876ee67676eb",
+		"name": "Jeju Olle Docent API Collection",
+		"description": "Jeju Olle Docent B2B Report Generation System API Endpoints",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/health",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"health"
+					]
+				},
+				"description": "Check if the API server is healthy and running."
+			},
+			"response": []
+		},
+		{
+			"name": "Generate B2B Report (SSE)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"query\": \"구좌읍 5월 당근밭 테마로 B2B 기획서 작성해줘\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:8000/api/v1/report/generate",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"api",
+						"v1",
+						"report",
+						"generate"
+					]
+				},
+				"description": "Initiate the LangGraph agent to generate a B2B Olle course report via Server-Sent Events (SSE) stream."
+			},
+			"response": []
+		}
+	]
+}
