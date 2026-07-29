@@ -62,7 +62,8 @@ from src.services.price_estimation_service import (
 # (위 "외부 의존성" 블록과 의도적으로 분리해 둡니다 — 어떤 이름이 외부에서 온
 #  재노출이고 어떤 이름이 이 패키지 서브모듈 소유인지 한눈에 구분되도록.
 #  `# isort: split` 은 두 블록을 하나로 합치려는 규칙만 끄는 표시입니다.)
-from src.agent.nodes.intent import (
+from src.agent.nodes.analyzer import (
+    analyze_intent_node,
     classify_intent_node,
     parse_intent_node,
     resolve_market_location_node,
@@ -104,7 +105,8 @@ from src.agent.nodes.safety import evaluate_safety_node
 from src.agent.nodes.tools import tool_agent_node, tool_executor_node
 
 __all__ = [
-    # 11개 노드 함수 (graph.py 가 가져다 쓰는 공개 API)
+    # 9개 노드 파이프라인 통합 공개 API
+    "analyze_intent_node",
     "classify_intent_node",
     "parse_intent_node",
     "resolve_market_location_node",

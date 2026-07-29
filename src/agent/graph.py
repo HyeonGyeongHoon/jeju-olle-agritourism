@@ -2,13 +2,11 @@ from langgraph.graph import END, StateGraph
 
 # pyrefly: ignore [missing-import]
 from src.agent.nodes import (
+    analyze_intent_node,
     check_quality_node,
-    classify_intent_node,
     evaluate_safety_node,
     generate_report_node,
-    parse_intent_node,
     quick_responder_node,
-    resolve_market_location_node,
     retrieve_rag_node,
     rewrite_query_node,
     tool_agent_node,
@@ -22,15 +20,6 @@ from src.agent.state import AgentState
 from src.models.schema import IntentCategory
 
 
-def route_after_intent_classify(state: AgentState) -> str:
-    """intent_classifier 이후, 의도 분류가 other 인 경우 B2B 상품 기획이나 올레 코스 RAG 의
-    범위를 완전히 벗어나므로 키워드 분석(intent_parser)을 타지 않고 바로 quick_responder 로
-    직행시킵니다. 그 외 의도는 정상적으로 키워드 분석으로 라우팅합니다."""
-    if state.get("intent_category") == IntentCategory.OTHER.value:
-        return "quick_response"
-    return "parse_intent"
-
-
 def route_after_quick_response(state: AgentState) -> str:
     """quick_responder 이후, skip_quality_check 가 True 로 설정되어 있으면
     더 이상의 추가 도구 호출이나 품질 검증 루프가 불필요하므로 즉시 END 로 종료합니다.
@@ -40,26 +29,10 @@ def route_after_quick_response(state: AgentState) -> str:
     return "tool_agent"
 
 
-def route_after_intent_parse(state: AgentState) -> str:
-    """질문 분석 결과(intent_parser)를 보고, 통계 기반 지역 역검색 조건이 존재하면
-    market_location_resolver 로 보내고, 조건이 없으면 해당 노드를 완전히 건너뛰어
-    의도에 따라 quick_responder 또는 safety_evaluator 로 직행시킵니다."""
-    b2b_params = state.get("b2b_params") or {}
-    query_spec = b2b_params.get("market_location_query")
-    # 통계 역검색 조건이 존재하고, 직접 명시한 preferred_location 이 없는 경우에만 resolver 실행
-    if query_spec and query_spec.get("metric") and not b2b_params.get("preferred_location"):
-        return "resolve_location"
-        
-    if state.get("intent_category") == IntentCategory.COURSE_RECOMMENDATION.value:
-        return "full_pipeline"
-    return "quick_response"
-
-
-def route_after_location_resolve(state: AgentState) -> str:
-    """의도 분류 결과가 course_recommendation 일 때만 코스 기획서 전체 파이프라인
-    (safety_evaluator 이후)으로 진행하고, 그 외 의도(info_lookup / other)는 모두 가벼운
-    정보 조회 파이프라인으로 분기합니다. info_lookup / other 는 기획서 생성 목적이 없으므로
-    무거운 full pipeline을 우회하여 quick_responder 로 처리합니다."""
+def route_after_analysis(state: AgentState) -> str:
+    """intent_analyzer 이후, 의도 분류 결과가 course_recommendation 일 때만 B2B 상품 기획서
+    전체 파이프라인(safety_evaluator)으로 진행하고, 그 외 의도(info_lookup / other)는 모두
+    quick_responder 로 분기합니다."""
     if state.get("intent_category") == IntentCategory.COURSE_RECOMMENDATION.value:
         return "full_pipeline"
     return "quick_response"
@@ -137,9 +110,7 @@ def build_agent_graph():
     workflow = StateGraph(AgentState)
 
     # 1. 그래프 노드 추가
-    workflow.add_node("intent_classifier", classify_intent_node)
-    workflow.add_node("intent_parser", parse_intent_node)
-    workflow.add_node("market_location_resolver", resolve_market_location_node)
+    workflow.add_node("intent_analyzer", analyze_intent_node)
     workflow.add_node("safety_evaluator", evaluate_safety_node)
     workflow.add_node("retriever", retrieve_rag_node)
     workflow.add_node("report_generator", generate_report_node)
@@ -150,26 +121,15 @@ def build_agent_graph():
     workflow.add_node("tool_agent", tool_agent_node)
 
     # 2. 고정 경로 엣지 연결
-    workflow.set_entry_point("intent_classifier")
+    workflow.set_entry_point("intent_analyzer")
     
-    # 의도 분석 분류 결과에 따라 키워드 분석(intent_parser)을 탈지 바로 quick_responder 로 우회할지 분기
+    # 의도 분석 및 해석 결과에 따라 B2B 기획서 생성 또는 Q&A로 단일 분기
     workflow.add_conditional_edges(
-        "intent_classifier",
-        route_after_intent_classify,
+        "intent_analyzer",
+        route_after_analysis,
         {
             "quick_response": "quick_responder",
-            "parse_intent": "intent_parser"
-        }
-    )
-    
-    # intent_parser 의 분석 결과(키워드)에 따라 resolver 실행 여부 분기
-    workflow.add_conditional_edges(
-        "intent_parser",
-        route_after_intent_parse,
-        {
-            "resolve_location": "market_location_resolver",
-            "full_pipeline": "safety_evaluator",
-            "quick_response": "quick_responder"
+            "full_pipeline": "safety_evaluator"
         }
     )
     
@@ -187,16 +147,6 @@ def build_agent_graph():
     )
     
     workflow.add_edge("tool_executor", "tool_agent")
-
-    # 2-1. course_recommendation 의도만 full pipeline, 나머지는 quick_responder 로 우회
-    workflow.add_conditional_edges(
-        "market_location_resolver",
-        route_after_location_resolve,
-        {
-            "quick_response": "quick_responder",
-            "full_pipeline": "safety_evaluator"
-        }
-    )
 
     # 2-1-1. 무조건 반려(Fail-Fast): DB 매칭 코스가 0건이면 기획서를 생성하지 않고 반려 경로로.
     # (2026-07-24~25 에는 retriever → report_generator 고정 엣지였습니다 — docent_generator/

@@ -1,26 +1,25 @@
 from src.agent.graph import (
-    route_after_location_resolve,
+    route_after_analysis,
     route_after_retriever,
     route_after_rewrite,
 )
 from src.models.schema import IntentCategory
 
 
-def test_route_after_location_resolve_sends_only_recommendation_to_full_pipeline():
+def test_route_after_analysis_sends_only_recommendation_to_full_pipeline():
     """course_recommendation 의도만 full_pipeline 선로로 라우팅되어야 합니다."""
     state = {"intent_category": IntentCategory.COURSE_RECOMMENDATION.value}
-    assert route_after_location_resolve(state) == "full_pipeline"
+    assert route_after_analysis(state) == "full_pipeline"
 
 
-def test_route_after_location_resolve_sends_non_recommendation_to_info_lookup():
-    """other / info_lookup 은 모두 quick_responder 선로로 라우팅되어야 합니다(2026-07-26:
-    옛 course_info / olle_general_info 는 info_lookup 으로 통합됨)."""
+def test_route_after_analysis_sends_non_recommendation_to_info_lookup():
+    """other / info_lookup 은 모두 quick_responder 선로로 라우팅되어야 합니다."""
     for category in (
         IntentCategory.OTHER,
         IntentCategory.INFO_LOOKUP,
     ):
         state = {"intent_category": category.value}
-        assert route_after_location_resolve(state) == "quick_response", (
+        assert route_after_analysis(state) == "quick_response", (
             f"{category.value} 의도는 quick_responder 선로로 라우팅되어야 합니다."
         )
 
