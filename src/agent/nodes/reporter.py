@@ -8,8 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any, Dict, List
 
+# pyrefly: ignore [missing-import]
 from src.agent.prompts.loader import load_prompt
+# pyrefly: ignore [missing-import]
 from src.agent.state import AgentState
+# pyrefly: ignore [missing-import]
 from src.models.schema import IntentCategory
 
 # --- 로컬 임포트 규약 (2026-07-26 분할 시 도입, 반드시 유지) ---
@@ -446,7 +449,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
         answer_parts.append(safety_str)
 
     if answer_parts:
-        answer = "\n\n".join(answer_parts).strip().replace("~", "～")
+        answer = "\n\n".join(answer_parts).strip().replace("~", " - ")
     else:
         answer = (
             "죄송합니다. 질문하신 내용과 관련된 제주 문화·작물 지식, 관광 방문객 통계, "

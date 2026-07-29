@@ -8,6 +8,7 @@ import re
 from datetime import date
 from typing import Any, Dict
 
+# pyrefly: ignore [missing-import]
 from src.agent.state import AgentState
 
 # --- 로컬 임포트 규약 (2026-07-26 분할 시 도입, 반드시 유지) ---

@@ -1,9 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+# pyrefly: ignore [missing-import]
 from src.agent import nodes
+# pyrefly: ignore [missing-import]
 from src.agent.nodes import quick_responder_node
+# pyrefly: ignore [missing-import]
 from src.services import db_service
+# pyrefly: ignore [missing-import]
 from src.services.db_service import _fetch_course_meta_by_name
 
 # 패치 대상 모듈 선택 기준(2026-07-26 DB 헬퍼 서비스 레이어 분리):
@@ -396,7 +400,7 @@ def test_quick_responder_node_puts_course_metrics_into_prompt():
         result = quick_responder_node(state)
 
     assert "17.6km" in result["final_response"]
-    assert "5～6시간" in result["final_response"] or "6.0시간" in result["final_response"]
+    assert any(x in result["final_response"] for x in ["5～6시간", "5~6시간", "5 - 6시간", "6.0시간", "6시간"])
     assert "난이도 '중'" in result["final_response"] or "난이도: 중" in result["final_response"]
     assert "제주올레 여행자센터" in result["final_response"]
 

@@ -1,8 +1,11 @@
 import json
 import re
 
+# pyrefly: ignore [missing-import]
 from src.agent.llm_client import get_chat_completion
+# pyrefly: ignore [missing-import]
 from src.agent.prompts.loader import load_prompt
+# pyrefly: ignore [missing-import]
 from src.models.schema import IntentCategory, RouterResult
 
 # --- 1단계: 규칙 기반 사전 필터 (LLM 호출 없이 즉시 분류) ---
@@ -22,7 +25,7 @@ _PROFANITY_KEYWORDS = ("바보", "멍청이", "미친", "씨발", "개새끼", "
 # 아래 키워드가 하나도 없이 "코스"/"올레" + "추천"만 있으면, 기획서가 아니라 단순 코스
 # 추천을 요청하는 것으로 간주합니다(이 서비스는 코스 추천 자체는 제공하지 않음).
 _PROPOSAL_KEYWORDS = ("기획서", "기획안", "기획해", "상품 기획", "상품화")
-_COURSE_REFERENCE_KEYWORDS = ("코스", "올레")
+_COURSE_REFERENCE_KEYWORDS = ("코스", "올레", "여행", "관광", "탐방")
 
 # 위 거절 규칙의 예외 — 이미 특정 코스를 지목한 상태에서 그 코스에 대한 의견/적합성을
 # 묻는 질의(예: "1코스 괜찮을지 추천해줄래?")는 "아무 코스나 추천해달라"는 요청과 성격이
