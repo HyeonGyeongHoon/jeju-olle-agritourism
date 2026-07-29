@@ -1,5 +1,4 @@
 import os
-from typing import List, Tuple, Optional
 
 # langchain_openai 또는 langchain.chat_models 로부터 ChatOpenAI를 안전하게 모듈 로드 시점에 임포트 시도
 try:
@@ -7,6 +6,7 @@ try:
     is_third_party = True
 except ImportError:
     try:
+        # pyrefly: ignore [missing-import]
         from langchain.chat_models import ChatOpenAI
         is_third_party = False
     except ImportError:
@@ -19,7 +19,8 @@ DEFAULT_SOLAR_CHAT_MODEL = "solar-pro2"
 def _build_messages_for_langchain(system_prompt: str, user_message: str):
     # langchain expects Message objects; build them lazily to avoid import-time errors
     try:
-        from langchain.schema import SystemMessage, HumanMessage
+        # pyrefly: ignore [missing-import]
+        from langchain.schema import HumanMessage, SystemMessage
     except Exception:
         return None
     return [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
@@ -59,11 +60,20 @@ def get_chat_completion(
         response = llm.invoke(messages)
         return response.content
     else:
-        # Try canonical langchain __call__ method using Message objects
         lc_messages = _build_messages_for_langchain(system_prompt, user_message)
         if lc_messages is not None:
-            resp = llm(lc_messages)
-            # Try common response shapes:
+            # First try canonical langchain __call__ method using Message objects
+            try:
+                resp = llm(lc_messages)
+            except Exception:
+                # If the llm instance exposes an `invoke`, try it and allow its exception to propagate
+                if hasattr(llm, "invoke"):
+                    messages = [("system", system_prompt), ("user", user_message)]
+                    resp = llm.invoke(messages)
+                else:
+                    raise
+
+            # Try common response shapes from either call
             if hasattr(resp, "content"):
                 return resp.content
             # LLMResult with generations:
@@ -72,11 +82,28 @@ def get_chat_completion(
                     return resp.generations[0][0].text
                 except Exception:
                     pass
-            # If result is an AIMessage object
+            # If result is an AIMessage object or fallback string
             try:
                 return str(resp)
             except Exception:
                 pass
 
+            # As a last resort, if llm has an invoke() method we haven't tried yet, try it now
+            if hasattr(llm, "invoke"):
+                messages = [("system", system_prompt), ("user", user_message)]
+                resp2 = llm.invoke(messages)
+                if hasattr(resp2, "content"):
+                    return resp2.content
+                if hasattr(resp2, "generations"):
+                    try:
+                        return resp2.generations[0][0].text
+                    except Exception:
+                        pass
+                try:
+                    return str(resp2)
+                except Exception:
+                    pass
+
         # fallback to raising if we couldn't parse response
         raise RuntimeError("Unable to obtain text from langchain chat model response.")
+
