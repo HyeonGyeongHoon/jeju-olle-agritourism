@@ -397,9 +397,9 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             f"- 월간 총 방문객 수: {total_v:,}명"
         )
         if yoy is not None:
-            stats_str += f"\n- 전년 동월 대비 증감률: {yoy * 100:.1f}%"
+            stats_str += f"\n- 전년 동월 대비 증감률: {yoy:.1f}%"
         if female is not None and male is not None:
-            stats_str += f"\n- 성비 구성: 여성 {female * 100:.1f}% / 남성 {male * 100:.1f}%"
+            stats_str += f"\n- 성비 구성: 여성 {female:.1f}% / 남성 {male:.1f}%"
 
         if location_resolution:
             # 전역 변수인 _MARKET_METRIC_LABELS 를 직접 사용합니다.
@@ -416,7 +416,7 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
             f"- 월간 {total_v:,}명 수준의 통계 수치를 고려하여, 다중 밀집 구역 내 안전 요원 배치 상태 파악 및 비상 대피 통로 확보 가이드 수립 필요."
         )
         if yoy is not None and yoy > 0:
-            stats_str += f"\n- 전년 대비 방문객 증가 추세({yoy * 100:.1f}% 증가)를 반영한 주차난 해소 및 셔틀버스 증편 계획 수립 권장."
+            stats_str += f"\n- 전년 대비 방문객 증가 추세({yoy:.1f}% 증가)를 반영한 주차난 해소 및 셔틀버스 증편 계획 수립 권장."
 
         answer_parts.append(stats_str)
 

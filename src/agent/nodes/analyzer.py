@@ -102,11 +102,33 @@ def resolve_market_location_node(state: AgentState) -> Dict[str, Any]:
         _get_latest_available_year_month,
         _get_olle_relevant_admin_dongs,
         get_supabase_client,
+        _search_culture_knowledge,
     )
 
     b2b_params = state.get("b2b_params") or {}
     query_spec = b2b_params.get("market_location_query")
-    if not query_spec or not query_spec.get("metric") or b2b_params.get("preferred_location"):
+    preferred_loc = b2b_params.get("preferred_location")
+    key_crop = b2b_params.get("key_item_or_crop")
+
+    # preferred_location이 없고 key_crop이 지정된 경우, 해당 작물의 주산지를 먼저 매핑합니다.
+    if not preferred_loc and key_crop:
+        try:
+            client = get_supabase_client()
+            chunks = _search_culture_knowledge(client, key_crop, key_crop)
+            for chunk in chunks:
+                reg_tag = chunk.get("region_tag")
+                if reg_tag:
+                    preferred_loc = reg_tag
+                    print(f"[*] 작물('{key_crop}') 기반 주산지 선정: {preferred_loc}")
+                    break
+        except Exception as e:
+            print(f"[!] 작물 기반 주산지 검색 중 오류 발생: {e}")
+
+    if not query_spec or not query_spec.get("metric") or preferred_loc:
+        if preferred_loc and preferred_loc != b2b_params.get("preferred_location"):
+            updated_b2b_params = dict(b2b_params)
+            updated_b2b_params["preferred_location"] = preferred_loc
+            return {"b2b_params": updated_b2b_params}
         return {}
 
     metric = query_spec["metric"]
