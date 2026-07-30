@@ -594,3 +594,32 @@ def _fetch_safety_etiquette_guide(client: Any) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"[!] safety_etiquette_guide 조회 실패: {e}")
         return []
+
+
+def _fetch_representative_crop_by_admin_dong(client: Any, admin_dong: str) -> str | None:
+    """행정동/읍/면 이름을 받아 해당 지역을 경유하는 올레 코스들의 대표 재배 작물을 조회합니다."""
+    legal_dongs = _ADMIN_DONG_TO_LEGAL_DONGS.get(admin_dong)
+    if not legal_dongs:
+        return None
+
+    try:
+        res = client.table("courses").select("administrative_areas, crops").execute()
+        if not res.data:
+            return None
+
+        crops_found = []
+        for row in res.data:
+            areas_str = row.get("administrative_areas") or ""
+            areas = [a.strip() for a in areas_str.split(",") if a.strip()]
+
+            if any(area in legal_dongs for area in areas):
+                course_crops = row.get("crops") or ""
+                for crop in course_crops.split(","):
+                    crop_cleaned = crop.strip()
+                    if crop_cleaned and crop_cleaned not in crops_found:
+                        crops_found.append(crop_cleaned)
+
+        return crops_found[0] if crops_found else None
+    except Exception as e:
+        print(f"[!] 행정동 기반 대표 작물 조회 중 오류 발생: {e}")
+        return None

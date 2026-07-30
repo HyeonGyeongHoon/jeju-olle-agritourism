@@ -273,6 +273,15 @@ def quick_responder_node(state: AgentState) -> Dict[str, Any]:
                 client, course_meta.get("administrative_areas")
             )
 
+    # 질문에 작물/농업 키워드가 있고, 지역 정보는 지정되었으나 작물명이 비어 있는 경우 대표 작물을 자동 보완합니다.
+    if is_query_agro_related and preferred_location and not key_item_or_crop:
+        # pyrefly: ignore [missing-import]
+        from src.services.db_service import _fetch_representative_crop_by_admin_dong
+        resolved_crop = _fetch_representative_crop_by_admin_dong(client, preferred_location)
+        if resolved_crop:
+            key_item_or_crop = resolved_crop
+            print(f"[DEBUG] 지역 기반 대표 작물 자동 보완: {preferred_location} -> {key_item_or_crop}")
+
     # 질문에 작물명/테마(key_item_or_crop)도 컨셉 테마(concept_theme)도 없으면 문화지식 검색
     # 자체를 실행하지 않습니다. _search_culture_knowledge 는 key_item_or_crop 이 없으면
     # fallback_query(원본 질의 텍스트)를 그대로 임베딩해 유사도 0.1의 낮은 임계치로 검색하므로,
