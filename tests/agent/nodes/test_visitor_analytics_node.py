@@ -223,3 +223,22 @@ def test_fetch_market_insight_fails_closed_when_normalization_is_ambiguous():
     )
 
     assert _fetch_market_insight(client, "신촌", None) is None
+
+
+def test_fetch_market_insight_resolves_multi_location_with_slashes():
+    """region_dong 이 '구좌읍/성산읍'처럼 슬래시로 연결된 경우, 첫 번째 지역명인
+    '구좌읍'을 대표로 하여 visitor_analytics 테이블을 조회해야 한다."""
+    client = _FakeVisitorAnalyticsClient(
+        [
+            {"region_dong": "구좌읍", "year_month": "2026-05", "total_visitors": 460038},
+            {"region_dong": "성산읍", "year_month": "2026-05", "total_visitors": 300000},
+        ]
+    )
+
+    result = _fetch_market_insight(client, "구좌읍/성산읍", 5)
+
+    assert result == {
+        "region_dong": "구좌읍",
+        "year_month": "2026-05",
+        "total_visitors": 460038,
+    }

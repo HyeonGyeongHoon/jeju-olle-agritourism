@@ -512,6 +512,9 @@ def _course_row_matches_location(row: Dict[str, Any], preferred_location: str) -
        읍/면/동이 확정된 값이므로, 여기서 안 걸리면 그 코스는 그 지역 코스가 아닙니다.
     4) eup_myeon_dong_areas 가 비어있는(NULL/빈 문자열 — 백필 전이거나 신규 추가된) 행에
        한해서만 예전 법정리 역확장 매칭으로 폴백합니다. 과도기 방어용 경로입니다.
+
+    ★ 복합 지역명 지원: preferred_location에 슬래시('/')가 포함된 경우(예: "구좌읍/성산읍"),
+       이를 분할하여 개별 지역명 중 하나라도 위 규칙들 중 매칭을 만족하면 True를 반환합니다.
     """
     # pyrefly: ignore [missing-import]
     from src.agent.nodes import (
@@ -519,30 +522,38 @@ def _course_row_matches_location(row: Dict[str, Any], preferred_location: str) -
         _normalize_admin_tier_name,
     )
 
-    if preferred_location in (row.get("course_name") or ""):
-        return True
+    # 복합 지역명 분할 처리
+    locations = [loc.strip() for loc in preferred_location.split("/") if loc.strip()]
+    if not locations:
+        return False
 
-    if preferred_location in _split_comma_tokens(row.get("administrative_areas")):
-        return True
-
-    eup_myeon_tokens = _split_comma_tokens(row.get("eup_myeon_dong_areas"))
-    if eup_myeon_tokens:
-        if preferred_location in eup_myeon_tokens:
+    for loc in locations:
+        if loc in (row.get("course_name") or ""):
             return True
-        # 접미사를 생략한 표기("한림" = "한림읍")까지만 관대하게 허용합니다. 예전의 부분 문자열
-        # 매칭은 이 정도의 관대함을 사실상 제공했고, 무조건 반려 정책 아래에서는 이런 표기 차이가
-        # 곧바로 사용자에게 "코스를 찾지 못했다"는 반려로 나타나므로 이 경로만 남깁니다.
-        normalized = _normalize_admin_tier_name(preferred_location)
-        return any(
-            _normalize_admin_tier_name(token) == normalized for token in eup_myeon_tokens
-        )
 
-    legacy_candidates = {preferred_location} | set(
-        _ADMIN_DONG_TO_LEGAL_DONGS.get(preferred_location, [])
-    )
-    return any(
-        cand in (row.get("administrative_areas") or "") for cand in legacy_candidates
-    )
+        if loc in _split_comma_tokens(row.get("administrative_areas")):
+            return True
+
+        eup_myeon_tokens = _split_comma_tokens(row.get("eup_myeon_dong_areas"))
+        if eup_myeon_tokens:
+            if loc in eup_myeon_tokens:
+                return True
+            # 접미사를 생략한 표기("한림" = "한림읍")까지만 관대하게 허용합니다.
+            normalized = _normalize_admin_tier_name(loc)
+            if any(
+                _normalize_admin_tier_name(token) == normalized for token in eup_myeon_tokens
+            ):
+                return True
+        else:
+            legacy_candidates = {loc} | set(
+                _ADMIN_DONG_TO_LEGAL_DONGS.get(loc, [])
+            )
+            if any(
+                cand in (row.get("administrative_areas") or "") for cand in legacy_candidates
+            ):
+                return True
+
+    return False
 
 
 def _filter_course_ids_by_location(

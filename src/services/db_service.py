@@ -325,9 +325,20 @@ def _fetch_market_insight(client: Any, region_dong: str | None, target_month: in
     region_dong 표기가 DB 값과 정확히 같으면(대부분의 경우) 예전과 똑같이 단 한 번만 조회하고,
     0건일 때에만 `_resolve_canonical_region_dong` 으로 접미사 표기 차이("한림" vs "한림읍")를
     해소해 정식 표기로 한 번 더 조회합니다(추가 조회는 실패 경로에서만 발생).
+
+    ★ 복합 지역명 지원: region_dong 에 슬래시('/')가 포함된 경우(예: "구좌읍/성산읍"),
+       슬래시로 분할한 뒤 첫 번째 유효한 지역명을 대표로 사용하여 통계를 조회합니다.
     """
     if not region_dong:
         return None
+
+    # 복합 지역명 처리 (첫 번째 유효한 지역을 대표로 설정)
+    if "/" in region_dong:
+        parts = [p.strip() for p in region_dong.split("/") if p.strip()]
+        if parts:
+            region_dong = parts[0]
+        else:
+            return None
 
     row = _query_visitor_analytics_row(client, region_dong, target_month)
     if row is not None:

@@ -296,3 +296,35 @@ def test_filter_course_ids_releases_filter_on_query_exception():
 
     assert matched is False
     assert result_ids == [1, 2]
+
+
+def test_filter_course_ids_matches_multi_location_with_slashes():
+    """preferred_location이 '구좌읍/성산읍'처럼 슬래시로 묶인 복합 지역명인 경우,
+    개별 지역 중 하나라도 겹치면 해당 코스가 매칭되어야 한다."""
+    client = _client_with_rows(
+        [
+            {
+                "id": 1,
+                "administrative_areas": "시흥리,종달리",
+                "course_name": "1코스",
+                "eup_myeon_dong_areas": "성산읍,구좌읍",
+            },
+            {
+                "id": 20,
+                "administrative_areas": "김녕리,세화리",
+                "course_name": "20코스",
+                "eup_myeon_dong_areas": "구좌읍",
+            },
+            {
+                "id": 15,
+                "administrative_areas": "한림리,대림리",
+                "course_name": "15-A코스",
+                "eup_myeon_dong_areas": "한림읍",
+            },
+        ]
+    )
+
+    result_ids, matched = _filter_course_ids_by_location(client, [1, 20, 15], "구좌읍/성산읍")
+
+    assert matched is True
+    assert set(result_ids) == {1, 20}
